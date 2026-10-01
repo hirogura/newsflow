@@ -1,0 +1,1334 @@
+'use strict';
+
+/**
+ * newsflow server.js
+ * - 47都道府県のローカルニュースを RSS から15分ごとに定期収集・仕分け
+ * - GET /api/news で仕分け済み最新ニュースを JSON 配信（§4.2.2 固定契約 + 拡張キー）
+ * - public/ を静的配信（サイネージ画面 + RSS管理画面）
+ * - PORT: 3364
+ * - 拡張: 記事本文抽出(og:description優先) / 3行要約 / 類似グループ化・分散配置 /
+ *         RSSフィード追加削除API (data/feeds.json 永続化)
+ */
+
+const express = require('express');
+const cors = require('cors');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { execFile, exec } = require('child_process');
+const Parser = require('rss-parser');
+
+const PORT = process.env.PORT || 3364;
+// アプリバージョン（画面表記は「v.」+ この値）
+const VERSION = '0.1.0';
+const DEFAULT_INTERVAL_MINUTES = 15;
+let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
+let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
+const MAX_PER_PREF = 10;
+// 読み上げ本文の最大文字数（3行相当の目安。現行 220 を維持）
+const BODY_READ_CHARS = parseInt(process.env.BODY_READ_CHARS || '220', 10) || 220;
+
+const BROWSER_UA =
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 newsflow/1.1 (+local signage)';
+
+// 既定フィード（初回のみ使用。以降は data/feeds.json が正）
+const DEFAULT_FEEDS = [
+  { name: 'Yahoo!ニュース 主要', url: 'https://news.yahoo.co.jp/rss/topics/top-picks.xml', enabled: true },
+  { name: '47NEWS 地域 最新ニュース', url: 'https://assets.wor.jp/rss/rdf/ynlocalnews/news.rdf', enabled: true },
+  { name: 'Yahoo!ニュース 地域', url: 'https://news.yahoo.co.jp/rss/topics/local.xml', enabled: true },
+  { name: 'Yahoo!ニュース 国内', url: 'https://news.yahoo.co.jp/rss/topics/domestic.xml', enabled: true },
+  { name: '47NEWS 全国 最新ニュース', url: 'https://assets.wor.jp/rss/rdf/ynnews/news.rdf', enabled: true },
+];
+
+// 可変フィード一覧（参照を維持したまま loadFeeds() で中身を置換する）
+const FEEDS = DEFAULT_FEEDS.map((f) => ({ ...f }));
+
+const DATA_FILE = path.join(__dirname, 'data', 'news.json');
+const FEEDS_FILE = path.join(__dirname, 'data', 'feeds.json');
+const SETTINGS_FILE = path.join(__dirname, 'data', 'settings.json');
+
+// ---------- 設定ストア（RSS管理画面で変更。data/settings.json に永続化） ----------
+const ALLOWED_RATES = [0.8, 1.0, 1.2, 1.4, 1.6];
+const DEFAULT_SETTINGS = {
+  fetchIntervalMinutes: 15, // RSS取得間隔（分）
+  maxAgeHours: 24, // この時間以内のニュースのみ表示
+  ttsEnabled: true, // 読み上げ On/Off
+  ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
+};
+
+function getDefaultSettings() {
+  return { ...DEFAULT_SETTINGS };
+}
+
+/** 読み上げ速度を ALLOWED_RATES のいずれかに寄せる（数値以外は既定 1.2） */
+function snapRate(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return DEFAULT_SETTINGS.ttsRate;
+  let best = ALLOWED_RATES[0];
+  let bestDiff = Math.abs(n - best);
+  for (const r of ALLOWED_RATES) {
+    const d = Math.abs(n - r);
+    if (d < bestDiff) {
+      best = r;
+      bestDiff = d;
+    }
+  }
+  return best;
+}
+
+function isValidRate(v) {
+  return ALLOWED_RATES.includes(Number(v));
+}
+
+/**
+ * 設定の正規化（純粋関数。未知キー無視・範囲外は丸め/既定値）
+ * @param {object} input 部分設定でも可
+ * @param {object} base マージ元（省略時は既定値）
+ */
+function normalizeSettings(input, base) {
+  const b = { ...DEFAULT_SETTINGS, ...(base || {}) };
+  const s = { ...b };
+  const src = input && typeof input === 'object' ? input : {};
+  if (src.fetchIntervalMinutes !== undefined) {
+    let n = parseInt(src.fetchIntervalMinutes, 10);
+    if (!Number.isFinite(n)) n = b.fetchIntervalMinutes;
+    n = Math.max(5, Math.min(180, n));
+    s.fetchIntervalMinutes = n;
+  }
+  if (src.maxAgeHours !== undefined) {
+    let n = Number(src.maxAgeHours);
+    if (!Number.isFinite(n)) n = b.maxAgeHours;
+    n = Math.max(1, Math.min(168, n));
+    s.maxAgeHours = n;
+  }
+  if (src.ttsEnabled !== undefined) {
+    const v = src.ttsEnabled;
+    s.ttsEnabled = !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off');
+  }
+  if (src.ttsRate !== undefined) {
+    s.ttsRate = snapRate(src.ttsRate);
+  }
+  return s;
+}
+
+/** 記事が表示対象の時間内か（pubDate 優先・無ければ fetchedAt・日付無しは保持） */
+function isWithinHours(entry, maxAgeHours, nowMs) {
+  const hours = Number(maxAgeHours);
+  if (!Number.isFinite(hours) || hours <= 0) return true;
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const src = (entry && (entry.pubDate || entry.fetchedAt)) || null;
+  if (!src) return true;
+  const t = Date.parse(src);
+  if (Number.isNaN(t)) return true;
+  return now - t <= hours * 3600 * 1000;
+}
+
+/** 配列を時間フィルタで絞る（純粋関数） */
+function filterByAge(items, maxAgeHours, nowMs) {
+  if (!Array.isArray(items)) return [];
+  return items.filter((e) => isWithinHours(e, maxAgeHours, nowMs));
+}
+
+let settings = getDefaultSettings();
+
+function loadSettings() {
+  try {
+    if (!fs.existsSync(SETTINGS_FILE)) return settings;
+    const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf-8'));
+    const src = raw && raw.settings ? raw.settings : raw;
+    settings = normalizeSettings(src, getDefaultSettings());
+    return settings;
+  } catch (e) {
+    console.error('settings load failed (既定を使用):', String((e && e.message) || e));
+    return settings;
+  }
+}
+
+function saveSettings() {
+  try {
+    fs.mkdirSync(path.dirname(SETTINGS_FILE), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      SETTINGS_FILE,
+      JSON.stringify({ savedAt: now, updatedAt: now, settings }, null, 2),
+      'utf-8'
+    );
+  } catch (e) {
+    console.error('settings save failed:', String((e && e.message) || e));
+  }
+}
+
+/** 設定変更を取得タイマーに反映する */
+let fetchTimer = null;
+function applyIntervalSettings() {
+  INTERVAL_MINUTES = settings.fetchIntervalMinutes || DEFAULT_INTERVAL_MINUTES;
+  FETCH_INTERVAL_MS = INTERVAL_MINUTES * 60 * 1000;
+}
+
+function scheduleFetch() {
+  if (fetchTimer) clearInterval(fetchTimer);
+  fetchTimer = setInterval(() => {
+    fetchAllFeeds().catch((e) => console.error('periodic fetch failed:', e));
+  }, FETCH_INTERVAL_MS);
+  if (fetchTimer.unref) fetchTimer.unref();
+}
+
+/** 制御系 API（update/restart）の有効判定。DISABLE_CONTROL=1 で無効化 */
+function controlEnabled() {
+  const v = process.env.DISABLE_CONTROL;
+  return !(v === '1' || v === 'true');
+}
+
+// 47都道府県（北→南の順序。HTTP応答の順序にも使用）
+const PREFECTURES = [
+  '北海道', '青森県', '岩手県', '宮城県', '秋田県', '山形県', '福島県',
+  '茨城県', '栃木県', '群馬県', '埼玉県', '千葉県', '東京都', '神奈川県',
+  '新潟県', '富山県', '石川県', '福井県', '山梨県', '長野県',
+  '岐阜県', '静岡県', '愛知県', '三重県',
+  '滋賀県', '京都府', '大阪府', '兵庫県', '奈良県', '和歌山県',
+  '鳥取県', '島根県', '岡山県', '広島県', '山口県',
+  '徳島県', '香川県', '愛媛県', '高知県',
+  '福岡県', '佐賀県', '長崎県', '熊本県', '大分県', '宮崎県', '鹿児島県', '沖縄県',
+];
+
+// 判定用キーワード: 正式名 + 短縮形（「県/府/都」を落とした形）
+function shortName(pref) {
+  if (pref === '北海道') return '北海道';
+  if (pref === '東京都') return '東京';
+  if (pref === '大阪府') return '大阪';
+  if (pref === '京都府') return '京都';
+  return pref.replace(/(県|府|都)$/, '');
+}
+
+const PREF_KEYWORDS = PREFECTURES.map((pref) => ({
+  pref,
+  keywords: pref === shortName(pref) ? [pref] : [pref, shortName(pref)],
+}));
+
+/**
+ * タイトル＋本文から都道府県を判定（複数ヒット可）
+ * @returns {string[]} ヒットした都道府県名配列（なければ空配列）
+ */
+function detectPrefectures(title, body) {
+  const text = `${title || ''} ${body || ''}`;
+  if (!text.trim()) return [];
+  const hit = [];
+  for (const { pref, keywords } of PREF_KEYWORDS) {
+    if (pref === '京都府') {
+      // §4.2.1 必須例外: 「東京都」を「京都府」と誤判定しない。
+      // 正式名「京都府」は通常判定、短縮形「京都」は負の後読みで判定。
+      if (text.includes('京都府') || /(?<!東)京都/.test(text)) {
+        hit.push(pref);
+      }
+      continue;
+    }
+    if (keywords.some((kw) => kw && text.includes(kw))) {
+      hit.push(pref);
+    }
+  }
+  return hit;
+}
+
+// メモリ内ストア: { [pref]: Array<{prefecture,title,link,source,pubDate,fetchedAt,body,summary}> }
+// 「全国」は都道府県名を含まないニュースの受け皿バケット（内部保持のみ。/api/news の prefectures には含めない）
+const store = new Map();
+for (const p of PREFECTURES) store.set(p, []);
+store.set('全国', []);
+
+// 記事本文キャッシュ: url -> body（store と二重保持。オンデマンド解決用）
+const bodyCache = new Map();
+
+// フィード状態（/api/news の sources[]・/api/feeds の feeds[] として返却）
+function freshFeedState(f) {
+  return {
+    id: feedId(f.url),
+    name: f.name,
+    url: f.url,
+    enabled: f.enabled !== false,
+    ok: false,
+    items: 0,
+    error: null,
+  };
+}
+
+let feedStates = FEEDS.map(freshFeedState);
+
+let lastUpdatedAt = null;
+let lastFetchResult = { ok: 0, ng: 0, items: 0, errors: [] };
+
+const parser = new Parser({
+  timeout: 15000,
+  headers: { 'User-Agent': BROWSER_UA },
+});
+
+/** タイトル正規化: 前後trim・連続する半角/全角空白を1つに圧縮（§4.2.1 重複排除用） */
+function normalizeTitle(t) {
+  return (t || '').trim().replace(/[ \t\u3000]+/g, ' ');
+}
+
+function normalizeItem(raw, sourceName) {
+  const title = (raw.title || '').trim();
+  if (!title) return null;
+  const link = (raw.link || raw.guid || '').trim();
+  const pubDate =
+    raw.isoDate || raw.pubDate || (raw['dc:date'] || raw['dcterms:date'] || null);
+  const body = (raw.contentSnippet || raw.content || raw.summary || raw.description || '').toString();
+  let ts = null;
+  if (pubDate) {
+    const t = Date.parse(pubDate);
+    if (!Number.isNaN(t)) ts = new Date(t).toISOString();
+  }
+  return { title, link, pubDate: ts, body, source: sourceName };
+}
+
+// ---------- 要約（3行程度） ----------
+/**
+ * 本文を3文程度に要約して読み上げ用テキストを作る。
+ * - 文区切り（。！？) で分割し先頭から最大3文
+ * - 全体は最大 220 文字で丸める（TTS が長くなりすぎないように）
+ */
+function summarizeText(text, maxSentences = 3, maxChars = 220) {
+  const src = (text || '').replace(/\s+/g, ' ').trim();
+  if (!src) return '';
+  const parts = src.match(/[^。！？\n]+[。！？\n]?/g) || [src];
+  const sents = parts.map((s) => s.trim()).filter(Boolean).slice(0, maxSentences);
+  let out = sents.join('');
+  if (out.length > maxChars) out = out.slice(0, maxChars).replace(/…?$/, '…');
+  return out;
+}
+
+/**
+ * 読み上げ用の 3 行相当テキスト（指示書 §3.2 の bodyExcerpt）。
+ * summarizeText の別名（先頭3文・上限文字数で文末丸め）。現行 summary と同値。
+ */
+function bodyExcerpt(body, max) {
+  return summarizeText(body, 3, max == null ? BODY_READ_CHARS : max);
+}
+
+/**
+ * 記事 ID: link（無ければ title）の SHA-1 先頭 12 桁（crypto 使用・依存追加なし）
+ */
+function articleId(link, title) {
+  const src = (link && String(link)) || (title && String(title)) || '';
+  return crypto.createHash('sha1').update(src).digest('hex').slice(0, 12);
+}
+
+/**
+ * フィード ID: URL の SHA-1 先頭 12 桁（URL に対して安定）
+ */
+function feedId(url) {
+  return crypto.createHash('sha1').update(String(url || '').trim()).digest('hex').slice(0, 12);
+}
+
+// ---------- 類似記事グループ化 ----------
+function stripBrackets(s) {
+  return (s || '').replace(/【[^】]*】/g, '').replace(/［[^］]*］/g, '').replace(/\[[^\]]*\]/g, '');
+}
+
+function titleTokens(title) {
+  const t = stripBrackets(normalizeTitle(title))
+    .replace(/[、。！？「」『』（）()・―—\-:：;；\/|｜@＠#＃★☆※・]/g, ' ')
+    .trim();
+  if (!t) return new Set();
+  const tokens = new Set();
+  // 長い語の部分一致に効くよう、文字バイグラムも併用する
+  const compact = t.replace(/\s+/g, '');
+  for (let i = 0; i + 1 < compact.length; i++) {
+    tokens.add(compact.slice(i, i + 2));
+  }
+  for (const w of t.split(/\s+/)) {
+    if (w.length >= 2) tokens.add(w);
+  }
+  return tokens;
+}
+
+/**
+ * 日付・時刻・数字のみのトークンかどうかを判定する。
+ * 例: "10", "0月", "月1", "1日", "2026", "10/1" → true（類似度計算から除外）
+ * 数字を含み、かつ数字・日付単位・記号のみで構成される場合に true。
+ * "3銀"（銀は内容語）や "震度1" を含む語彙トークンは false（内容語として保持）。
+ * 数字を含まないトークンは内容語とみなして保持する（再現率維持のため）。
+ */
+function isDateNumericToken(tok) {
+  if (!tok) return true;
+  if (!/[0-9０-９]/.test(tok)) return false;
+  return /^[0-9０-９年月日時分秒曜週日号付紙面掲版載第／\/．\.\-\-―—:：,，、\s\(\)（）［］【\]()]+$/.test(tok);
+}
+
+/** titleTokens から日付・数字トークンを除いた内容語トークン集合を返す */
+function contentTokens(title) {
+  const all = titleTokens(title);
+  const out = new Set();
+  for (const t of all) {
+    if (!isDateNumericToken(t)) out.add(t);
+  }
+  return out;
+}
+/** タイトル類似度（0..1。内容語トークンの Jaccard。デバッグ・表示用） */
+function titleSimilarity(a, b) {
+  const ta = contentTokens(a);
+  const tb = contentTokens(b);
+  if (ta.size === 0 || tb.size === 0) return 0;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  const union = ta.size + tb.size - inter;
+  return union === 0 ? 0 : inter / union;
+}
+
+/**
+ * 2件のタイトルが「似た記事」かどうかを判定する。
+ * - 完全一致・包含（8文字以上）・同一リンク級の近さ → true
+ * - 内容語トークン（日付・数字トークンを除外）のバイグラム Jaccard + 包含率の複合ルール。
+ *   日付表現（例: 10月1日）の共通バイグラムだけでは統合されないよう、
+ *   数字を含む日付トークンを類似度計算から除外し、内容語の共通を必須とする。
+ *   ※貪欲クラスタリングは代表との比較のみ行うため連鎖的な巨大クラスタは生じない
+ */
+function areSimilarTitles(a, b) {
+  const na = stripBrackets(normalizeTitle(a)).replace(/\s+/g, '');
+  const nb = stripBrackets(normalizeTitle(b)).replace(/\s+/g, '');
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const short = Math.min(na.length, nb.length);
+  if (short >= 8 && (na.includes(nb) || nb.includes(na))) return true;
+  // 日付・数字トークンを除外した内容語トークンで類似度を計算する
+  const ta = contentTokens(a);
+  const tb = contentTokens(b);
+  if (ta.size < 4 || tb.size < 4) return false;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  // 内容語の共通が 2 件未満なら日付だけの一致とみなして統合しない
+  if (inter < 2) return false;
+  const union = ta.size + tb.size - inter;
+  const j = union === 0 ? 0 : inter / union;
+  const cont = inter / Math.min(ta.size, tb.size);
+  if (j >= 0.3) return true;
+  if (j >= 0.12 && cont >= 0.24 && inter >= 3) return true;
+  return false;
+}
+
+/** 類似判定のしきい値説明は areSimilarTitles を参照 */
+
+/**
+ * フラットな記事配列に groupId を付与する（貪欲クラスタリング）。
+ * @returns {{ items: Array, groups: Array<{groupId,size,titles}> }}
+ */
+function assignGroups(flatItems) {
+  const reps = []; // [{groupId, title, link}]
+  const groups = new Map(); // groupId -> indices
+  let n = 0;
+  const items = flatItems.map((item) => {
+    let gid = null;
+    for (const r of reps) {
+      if (
+        (item.link && r.link && item.link === r.link) ||
+        areSimilarTitles(item.title, r.title)
+      ) {
+        gid = r.groupId;
+        break;
+      }
+    }
+    if (!gid) {
+      n += 1;
+      gid = `g${n}`;
+      reps.push({ groupId: gid, title: item.title, link: item.link });
+      groups.set(gid, []);
+    }
+    groups.get(gid).push(item);
+    return { ...item, groupId: gid };
+  });
+  // groupSize を付与
+  for (const it of items) {
+    it.groupSize = (groups.get(it.groupId) || []).length;
+  }
+  const groupList = [...groups.entries()].map(([groupId, members]) => ({
+    groupId,
+    size: members.length,
+    representative: members[0] ? members[0].title : '',
+  }));
+  return { items, groups: groupList };
+}
+
+/**
+ * 同じ groupId が連続しないよう並べ替える（貪欲・元順序優先）。
+ * 残り候補のうち直前と groupId が異なるものを元順序で最も早いものから選ぶ。
+ */
+function interleaveAvoidSameGroup(items) {
+  const rest = items.slice();
+  const out = [];
+  let prevGid = null;
+  while (rest.length > 0) {
+    let pick = rest.findIndex((it) => it.groupId !== prevGid);
+    if (pick === -1) pick = 0; // 残り全部が同グループの場合は許容
+    const [one] = rest.splice(pick, 1);
+    out.push(one);
+    prevGid = one.groupId;
+  }
+  return out;
+}
+
+// ---------- 記事本文抽出 ----------
+function decodeEntities(s) {
+  return (s || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&yen;/gi, '¥')
+    .replace(/&amp;/g, '&')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => {
+      try {
+        return String.fromCodePoint(parseInt(h, 16));
+      } catch {
+        return '';
+      }
+    })
+    .replace(/&#(\d+);/g, (_, n) => {
+      try {
+        return String.fromCodePoint(parseInt(n, 10));
+      } catch {
+        return '';
+      }
+    });
+}
+
+function extractMetaContent(html, attr, value) {
+  // <meta property="og:description" content="..."> / <meta name="description" content="...">
+  // 属性順序が逆の場合にも対応するため2パターン試す
+  const patterns = [
+    new RegExp(
+      `<meta[^>]*${attr}\\s*=\\s*["']${value}["'][^>]*content\\s*=\\s*["']([\\s\\S]*?)["'][^>]*>`,
+      'i'
+    ),
+    new RegExp(
+      `<meta[^>]*content\\s*=\\s*["']([\\s\\S]*?)["'][^>]*${attr}\\s*=\\s*["']${value}["'][^>]*>`,
+      'i'
+    ),
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m && m[1]) return decodeEntities(m[1]).trim();
+  }
+  return '';
+}
+
+/**
+ * 記事HTMLから本文要約文を抽出する。優先度:
+ * 1. og:description 2. meta[name=description] 3. JSON-LD NewsArticle の description 4. 長めの <p>
+ */
+function extractArticleDescription(html) {
+  if (!html) return '';
+  const og = extractMetaContent(html, 'property', 'og:description');
+  if (og && og.length >= 10) return og;
+  const meta = extractMetaContent(html, 'name', 'description');
+  if (meta && meta.length >= 10) return meta;
+  const ldMatch = html.match(
+    /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+  );
+  if (ldMatch) {
+    for (const tag of ldMatch) {
+      const inner = tag.replace(/^<script[^>]*>/i, '').replace(/<\/script>\s*$/i, '');
+      const dm = inner.match(/"description"\s*:\s*"((?:\\.|[^"\\])*)"/);
+      if (dm && dm[1]) {
+        const desc = decodeEntities(dm[1].replace(/\\n/g, ' ').replace(/\\"/g, '"')).trim();
+        if (desc.length >= 10) return desc;
+      }
+    }
+  }
+  // フォールバック: 30文字以上の <p> の先頭
+  const ps = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter((t) => t.length >= 30);
+  if (ps.length > 0) return decodeEntities(ps[0]).slice(0, 500);
+  return '';
+}
+
+async function fetchArticleBody(url, timeoutMs = 10000) {
+  if (!url || !/^https?:\/\//.test(url)) return '';
+  if (bodyCache.has(url)) return bodyCache.get(url) || '';
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: ctl.signal,
+      headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,*/*' },
+      redirect: 'follow',
+    });
+    if (!res.ok) return '';
+    const html = await res.text();
+    const body = extractArticleDescription(html);
+    bodyCache.set(url, body);
+    if (bodyCache.size > 1000) {
+      const first = bodyCache.keys().next().value;
+      bodyCache.delete(first);
+    }
+    return body;
+  } catch {
+    return '';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** body 未取得の記事に本文を付与する（並列数制限・上限付き・ベストエフォート） */
+async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
+  const targets = items.filter((it) => it.link && !it.body).slice(0, limit);
+  let i = 0;
+  async function worker() {
+    while (i < targets.length) {
+      const it = targets[i++];
+      const body = await fetchArticleBody(it.link);
+      if (body) {
+        it.body = body;
+        it.summary = summarizeText(body);
+        bodyCache.set(it.link, body);
+        // store 側の同一 link にも反映
+        for (const [, list] of store) {
+          for (const e of list) {
+            if (e.link === it.link && !e.body) {
+              e.body = body;
+              e.summary = it.summary;
+            }
+          }
+        }
+      }
+    }
+  }
+  await Promise.allSettled(
+    Array.from({ length: Math.min(concurrency, targets.length) }, () => worker())
+  );
+}
+
+// ---------- 永続化 ----------
+function saveStore() {
+  try {
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
+    const data = {
+      savedAt: new Date().toISOString(),
+      lastUpdatedAt,
+      feedStates,
+      lastFetchResult,
+      store: Object.fromEntries(store.entries()),
+    };
+    fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2), 'utf-8');
+  } catch (e) {
+    console.error('persist save failed:', String((e && e.message) || e));
+  }
+}
+
+function loadStore() {
+  try {
+    if (!fs.existsSync(DATA_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+    if (raw && raw.store) {
+      for (const p of [...PREFECTURES, '全国']) {
+        if (Array.isArray(raw.store[p])) {
+          store.set(
+            p,
+            raw.store[p].map((e) => ({
+              prefecture: e.prefecture,
+              title: e.title,
+              link: e.link,
+              source: e.source,
+              pubDate: e.pubDate || null,
+              fetchedAt: e.fetchedAt,
+              body: e.body || '',
+              summary: e.summary || (e.body ? summarizeText(e.body) : ''),
+            }))
+          );
+          for (const e of store.get(p)) {
+            if (e.link && e.body) bodyCache.set(e.link, e.body);
+          }
+        }
+      }
+    }
+    if (raw && raw.lastUpdatedAt) lastUpdatedAt = raw.lastUpdatedAt;
+    // feedStates は件数が FEEDS と一致する場合のみ復元（フィード構成変更時は現状を優先）
+    if (Array.isArray(raw.feedStates)) {
+      // id / url ベースで突き合わせ（フィード数変更に耐える。旧形式 {name,url} も url で復元）
+      const byUrl = new Map();
+      const byId = new Map();
+      for (const s of raw.feedStates) {
+        if (!s || !s.url) continue;
+        byUrl.set(s.url, s);
+        if (s.id) byId.set(s.id, s);
+      }
+      feedStates = FEEDS.map((f) => {
+        const saved = byId.get(feedId(f.url)) || byUrl.get(f.url);
+        const base = freshFeedState(f);
+        if (saved) {
+          base.ok = !!saved.ok;
+          base.items = saved.items || 0;
+          base.error = saved.error || null;
+        }
+        return base;
+      });
+    }
+    if (raw && raw.lastFetchResult) lastFetchResult = raw.lastFetchResult;
+    console.log(`[起動] キャッシュ ${DATA_FILE} を読み込みました`);
+  } catch (e) {
+    console.error('persist load failed (続行):', String((e && e.message) || e));
+  }
+}
+
+// ---------- フィード管理 ----------
+function loadFeeds() {
+  try {
+    if (!fs.existsSync(FEEDS_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(FEEDS_FILE, 'utf-8'));
+    const arr = Array.isArray(raw) ? raw : raw.feeds;
+    if (!Array.isArray(arr) || arr.length === 0) return;
+    const cleaned = arr
+      .filter((f) => f && typeof f.url === 'string' && /^https?:\/\//.test(f.url.trim()))
+      .map((f) => ({
+        name: (f.name || f.url).toString().slice(0, 100),
+        url: f.url.trim(),
+        enabled: f.enabled !== false,
+      }));
+    if (cleaned.length === 0) return;
+    FEEDS.length = 0;
+    for (const f of cleaned) FEEDS.push(f);
+    feedStates = FEEDS.map(freshFeedState);
+    console.log(`[起動] フィード定義 ${FEEDS_FILE} を読み込みました (${FEEDS.length}件)`);
+  } catch (e) {
+    console.error('feeds load failed (既定を使用):', String((e && e.message) || e));
+  }
+}
+
+function saveFeeds() {
+  try {
+    fs.mkdirSync(path.dirname(FEEDS_FILE), { recursive: true });
+    const now = new Date().toISOString();
+    fs.writeFileSync(
+      FEEDS_FILE,
+      JSON.stringify(
+        {
+          savedAt: now,
+          updatedAt: now,
+          feeds: FEEDS.map((f) => ({
+            id: feedId(f.url),
+            name: f.name,
+            url: f.url,
+            enabled: f.enabled !== false,
+          })),
+        },
+        null,
+        2
+      ),
+      'utf-8'
+    );
+  } catch (e) {
+    console.error('feeds save failed:', String((e && e.message) || e));
+  }
+}
+
+/** 全 store を空にして永続化する（フィード削除時の古い記事残存を防ぐ） */
+function clearStore() {
+  for (const p of [...PREFECTURES, '全国']) store.set(p, []);
+  saveStore();
+}
+
+async function fetchAllFeeds() {
+  const fetchedAt = new Date().toISOString();
+  // §4.2.1: Promise.allSettled で全 FEEDS を並列取得（無効フィードはスキップ）
+  const targets = [];
+  FEEDS.forEach((feed, i) => {
+    if (feed.enabled !== false) targets.push({ feed, index: i });
+  });
+  const results = await Promise.allSettled(
+    targets.map(({ feed }) => parser.parseURL(feed.url))
+  );
+
+  let ok = 0;
+  let ng = 0;
+  let itemCount = 0;
+  const errors = [];
+  const nextStates = FEEDS.map((f) => freshFeedState(f));
+
+  results.forEach((r, k) => {
+    const { feed, index } = targets[k];
+    if (r.status === 'fulfilled') {
+      const items = (r.value && r.value.items) || [];
+      ok++;
+      itemCount += items.length;
+      nextStates[index] = {
+        id: feedId(feed.url),
+        name: feed.name,
+        url: feed.url,
+        enabled: true,
+        ok: true,
+        items: items.length,
+        error: null,
+      };
+      console.log(`[取得] ${feed.name}: ${items.length}件`);
+      for (const raw of items) {
+        const n = normalizeItem(raw, feed.name);
+        if (!n) continue;
+        const prefs = detectPrefectures(n.title, n.body);
+        const buckets = prefs.length > 0 ? prefs : ['全国'];
+        for (const pref of buckets) {
+          const list = store.get(pref) || [];
+          // 重複排除: 正規化タイトル or link をキーに同一県内の重複を除外
+          const normT = normalizeTitle(n.title);
+          const dup = list.some(
+            (e) => normalizeTitle(e.title) === normT || (n.link && e.link === n.link && n.link !== '')
+          );
+          if (dup) continue;
+          list.unshift({
+            prefecture: pref,
+            title: n.title,
+            link: n.link,
+            source: n.source,
+            pubDate: n.pubDate,
+            fetchedAt,
+            body: '',
+            summary: '',
+          });
+          // pubDate 新しい順に並べ替え（pubDateなしは後ろ）→ 最新10件に trims
+          list.sort((a, b) => {
+            if (a.pubDate && b.pubDate) return b.pubDate.localeCompare(a.pubDate);
+            if (a.pubDate) return -1;
+            if (b.pubDate) return 1;
+            return b.fetchedAt.localeCompare(a.fetchedAt);
+          });
+          if (list.length > MAX_PER_PREF) list.length = MAX_PER_PREF;
+          store.set(pref, list);
+        }
+      }
+    } else {
+      ng++;
+      const msg = String((r.reason && r.reason.message) || r.reason);
+      errors.push({ feed: feed.name, url: feed.url, error: msg });
+      nextStates[index] = {
+        id: feedId(feed.url),
+        name: feed.name,
+        url: feed.url,
+        enabled: true,
+        ok: false,
+        items: 0,
+        error: msg,
+      };
+      console.warn(`[取得失敗] ${feed.name}: ${msg}`);
+    }
+  });
+
+  feedStates = nextStates;
+  lastUpdatedAt = fetchedAt;
+  lastFetchResult = { ok, ng, items: itemCount, errors };
+  const totalKept = [...store.values()].reduce((s, l) => s + l.length, 0);
+  console.log(
+    `[${fetchedAt}] fetch done: ok=${ok} ng=${ng} rawItems=${itemCount} kept=${totalKept}`
+  );
+  saveStore();
+
+  // 本文抽出はベストエフォートで追いかけ取得（RSS取得自体はブロックしない設計だが、
+  // 起動直後の1回はクライアントが本文付きで受け取れるよう待機する)
+  try {
+    const all = [];
+    for (const [, list] of store) for (const e of list) all.push(e);
+    // 新しい順に上限付きで取得
+    all.sort((a, b) => (b.fetchedAt || '').localeCompare(a.fetchedAt || ''));
+    await fillMissingBodies(all);
+    saveStore();
+  } catch (e) {
+    console.warn('body fill failed (続行):', String((e && e.message) || e));
+  }
+}
+
+/** 全 store をフラット化（北→南順・県内は pubDate 新しい順のまま・時間フィルタ適用） */
+function flatItems() {
+  const out = [];
+  const nowMs = Date.now();
+  for (const pref of [...PREFECTURES, '全国']) {
+    const list = store.get(pref) || [];
+    for (const e of list) {
+      if (!isWithinHours(e, settings.maxAgeHours, nowMs)) continue;
+      out.push({
+        prefecture: e.prefecture || pref,
+        title: e.title,
+        link: e.link,
+        source: e.source,
+        pubDate: e.pubDate || null,
+        fetchedAt: e.fetchedAt,
+        body: e.body || bodyCache.get(e.link) || '',
+        summary: e.summary || summarizeText(e.body || bodyCache.get(e.link) || ''),
+      });
+    }
+  }
+  return out;
+}
+
+/** グループメンバーのキー（prefecture+title+link。他県の同一link重複を区別する） */
+function memberKey(m, fallbackPref) {
+  return `${m.prefecture || fallbackPref || ''}\u0000${m.title}\u0000${m.link}`;
+}
+
+/**
+ * related 配列を作る: 同グループの self 以外のメンバーを
+ * [{ title, link, source, pubDate }] 形で返す。単独グループは []。
+ */
+function relatedOf(members, selfKey) {
+  return (members || [])
+    .filter((m) => memberKey(m) !== selfKey)
+    .map((m) => ({ title: m.title, link: m.link, source: m.source, pubDate: m.pubDate || null }));
+}
+
+/** §4.2.2 固定契約の prefectures 配列を構築（北→南順・非空県のみ）+ 拡張キー付き */
+function buildPrefectures() {
+  const flat = flatItems();
+  const { items: grouped } = assignGroups(flat);
+  const byKey = new Map(grouped.map((g) => [memberKey(g), g]));
+  const membersByGroup = new Map();
+  for (const g of grouped) {
+    if (!membersByGroup.has(g.groupId)) membersByGroup.set(g.groupId, []);
+    membersByGroup.get(g.groupId).push(g);
+  }
+  const out = [];
+  const nowMs = Date.now();
+  for (const pref of PREFECTURES) {
+    const list = (store.get(pref) || []).filter((e) => isWithinHours(e, settings.maxAgeHours, nowMs));
+    if (list.length === 0) continue;
+    out.push({
+      prefecture: pref,
+      news: list.map((e) => {
+        const g = byKey.get(memberKey(e, pref));
+        const body = e.body || bodyCache.get(e.link) || '';
+        const summary = e.summary || summarizeText(body);
+        const members = (g && membersByGroup.get(g.groupId)) || [];
+        return {
+          title: e.title,
+          link: e.link,
+          source: e.source,
+          pubDate: e.pubDate,
+          fetchedAt: e.fetchedAt,
+          body,
+          summary,
+          groupId: g ? g.groupId : null,
+          groupSize: g ? g.groupSize : 1,
+          id: articleId(e.link, e.title),
+          bodyExcerpt: summary,
+          related: g ? relatedOf(members, memberKey(e, pref)) : [],
+        };
+      }),
+    });
+  }
+  return out;
+}
+
+/**
+ * サイネージ再生用の全体プレイリストを構築する。
+ * - 類似グループを割り当てた上で、同一 groupId が連続しないよう分散配置する。
+ * - 「全国」バケットは末尾に回す（ローカル優先）。
+ */
+function buildPlaylist() {
+  const flat = flatItems();
+  const local = flat.filter((e) => e.prefecture !== '全国');
+  const national = flat.filter((e) => e.prefecture === '全国');
+  const { items: grouped } = assignGroups(local);
+  const ordered = interleaveAvoidSameGroup(grouped);
+  const { items: groupedNat } = assignGroups(national);
+  const all = [...ordered, ...interleaveAvoidSameGroup(groupedNat)];
+  // playlist 要素にも id / bodyExcerpt / related を付与（追加のみ。既存キーは不変）
+  const membersByGroup = new Map();
+  for (const it of all) {
+    if (!membersByGroup.has(it.groupId)) membersByGroup.set(it.groupId, []);
+    membersByGroup.get(it.groupId).push(it);
+  }
+  return all.map((it) => {
+    const summary = it.summary || summarizeText(it.body || '');
+    return {
+      ...it,
+      summary,
+      id: articleId(it.link, it.title),
+      bodyExcerpt: summary,
+      related: relatedOf(membersByGroup.get(it.groupId) || [], memberKey(it)),
+    };
+  });
+}
+
+/** グループ一覧（表示用: ひとまとめ表示のため） */
+function buildGroups() {
+  const flat = flatItems();
+  const { groups } = assignGroups(flat);
+  const membersById = new Map(groups.map((g) => [g.groupId, []]));
+  const { items } = assignGroups(flat);
+  for (const it of items) membersById.get(it.groupId).push(it);
+  return groups.map((g) => ({
+    groupId: g.groupId,
+    size: g.size,
+    representative: g.representative,
+    titles: membersById.get(g.groupId).map((m) => ({ prefecture: m.prefecture, title: m.title })),
+  }));
+}
+
+function totalNewsCount() {
+  const nowMs = Date.now();
+  let n = 0;
+  for (const p of PREFECTURES) {
+    const list = store.get(p) || [];
+    for (const e of list) {
+      if (isWithinHours(e, settings.maxAgeHours, nowMs)) n++;
+    }
+  }
+  return n;
+}
+
+// ---- Express ----
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '64kb' }));
+app.use(express.static(path.join(__dirname, 'public')));
+
+// 仕分け済み最新ニュース一式（§4.2.2 固定契約 + 拡張キー playlist/groups）
+app.get('/api/news', (req, res) => {
+  const prefectures = buildPrefectures();
+  const totalNews = totalNewsCount();
+  // 互換のため旧キー (news/count/fetch/updatedAt) も残す
+  const news = {};
+  for (const [k, v] of store.entries()) news[k] = v;
+  const playlist = buildPlaylist();
+  const groups = buildGroups();
+  res.json({
+    generatedAt: new Date().toISOString(),
+    lastFetchAt: lastUpdatedAt,
+    intervalMinutes: INTERVAL_MINUTES,
+    totalNews,
+    sources: feedStates,
+    prefectures,
+    // 旧キー（互換）
+    updatedAt: lastUpdatedAt,
+    count: [...store.values()].reduce((s, l) => s + l.length, 0),
+    fetch: lastFetchResult,
+    news,
+    // 拡張キー（本タスク追加。既存キーの意味は不変）
+    playlist,
+    groups,
+    groupsCount: groups.length,
+    version: VERSION,
+    settings,
+  });
+});
+
+// 稼働確認用（§4.2.1 契約: ok/uptime/lastFetchAt/totalNews。updatedAt/port は互換で残す）
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    uptime: process.uptime(),
+    lastFetchAt: lastUpdatedAt,
+    totalNews: totalNewsCount(),
+    updatedAt: lastUpdatedAt,
+    port: PORT,
+    version: VERSION,
+  });
+});
+
+app.get('/api/status', (req, res) => {
+  const perPref = {};
+  for (const [k, v] of store.entries()) perPref[k] = v.length;
+  res.json({
+    ok: true,
+    updatedAt: lastUpdatedAt,
+    feeds: FEEDS,
+    fetch: lastFetchResult,
+    perPref,
+    version: VERSION,
+    settings,
+  });
+});
+
+// バージョン情報（トップページの小さな版表示用）
+app.get('/api/version', (req, res) => {
+  res.json({ ok: true, version: VERSION, display: `v.${VERSION}` });
+});
+
+// ---- 設定 API ----
+app.get('/api/settings', (req, res) => {
+  res.json({ ok: true, settings, allowedRates: ALLOWED_RATES, version: VERSION });
+});
+
+function handleSettingsUpdate(req, res) {
+  const next = normalizeSettings(req.body || {}, settings);
+  const intervalChanged = next.fetchIntervalMinutes !== settings.fetchIntervalMinutes;
+  settings = next;
+  applyIntervalSettings();
+  saveSettings();
+  if (intervalChanged) scheduleFetch();
+  res.json({ ok: true, settings, intervalMinutes: INTERVAL_MINUTES });
+}
+app.put('/api/settings', handleSettingsUpdate);
+app.post('/api/settings', handleSettingsUpdate);
+
+// ---- フィード エクスポート / インポート ----
+app.get('/api/feeds/export', (req, res) => {
+  res.json({
+    ok: true,
+    exportedAt: new Date().toISOString(),
+    version: VERSION,
+    feeds: FEEDS.map((f) => ({
+      id: feedId(f.url),
+      name: f.name,
+      url: f.url,
+      enabled: f.enabled !== false,
+    })),
+  });
+});
+
+function cleanFeedEntry(f) {
+  if (!f || typeof f.url !== 'string' || !/^https?:\/\//.test(f.url.trim())) return null;
+  return {
+    name: ((f.name || f.url).toString().slice(0, 100)),
+    url: f.url.trim(),
+    enabled: f.enabled !== false,
+  };
+}
+
+app.post('/api/feeds/import', (req, res) => {
+  const body = req.body || {};
+  const rawArr = Array.isArray(body) ? body : body.feeds;
+  if (!Array.isArray(rawArr)) {
+    return res.status(400).json({ ok: false, error: 'feeds 配列を指定してください' });
+  }
+  if (rawArr.length > 500) {
+    return res.status(400).json({ ok: false, error: '一度に取り込めるのは500件までです' });
+  }
+  const mode = (body.mode || 'replace').toString();
+  const cleaned = [];
+  const seen = new Set();
+  for (const f of rawArr) {
+    const e = cleanFeedEntry(f);
+    if (!e) continue;
+    const k = normalizeFeedUrl(e.url);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    cleaned.push(e);
+  }
+  if (mode === 'merge') {
+    let added = 0;
+    for (const e of cleaned) {
+      if (!FEEDS.some((f) => normalizeFeedUrl(f.url) === normalizeFeedUrl(e.url))) {
+        FEEDS.push(e);
+        added++;
+      }
+    }
+    feedStates = FEEDS.map((f) => {
+      const prev = feedStates.find((s) => s.url === f.url || s.id === feedId(f.url));
+      return prev || freshFeedState(f);
+    });
+    saveFeeds();
+    clearStore();
+    fetchAllFeeds().catch((e) => console.error('fetch after import failed:', e));
+    return res.json({ ok: true, imported: added, total: FEEDS.length, feeds: feedStates });
+  }
+  // 既定: replace（空配列は拒否して全消し事故を防ぐ）
+  if (cleaned.length === 0) {
+    return res.status(400).json({ ok: false, error: '有効なフィードがありません' });
+  }
+  FEEDS.length = 0;
+  for (const e of cleaned) FEEDS.push(e);
+  feedStates = FEEDS.map(freshFeedState);
+  saveFeeds();
+  clearStore();
+  fetchAllFeeds().catch((e) => console.error('fetch after import failed:', e));
+  res.json({ ok: true, imported: cleaned.length, total: FEEDS.length, feeds: feedStates });
+});
+
+// ---- 更新 / 再起動（制御系。DISABLE_CONTROL=1 で無効化） ----
+function restartServiceDetached() {
+  // 応答後に再起動するよう少し遅延させる（Restart=always のため復帰する）
+  setTimeout(() => {
+    exec('systemctl restart newsflow', (err) => {
+      if (err) {
+        console.error('systemctl restart failed, fallback to process exit:', String(err.message || err));
+        // systemd が無い環境ではプロセス終了→親の再起動に委ねる
+        setTimeout(() => process.exit(0), 500);
+      }
+    });
+  }, 500);
+}
+
+app.post('/api/restart', (req, res) => {
+  if (!controlEnabled()) {
+    return res.status(403).json({ ok: false, error: '制御APIは無効化されています (DISABLE_CONTROL=1)' });
+  }
+  res.json({ ok: true, message: 'サービスを再起動します' });
+  restartServiceDetached();
+});
+
+app.post('/api/update', (req, res) => {
+  if (!controlEnabled()) {
+    return res.status(403).json({ ok: false, error: '制御APIは無効化されています (DISABLE_CONTROL=1)' });
+  }
+  res.json({ ok: true, message: 'GitHub から更新を取得し、依存更新後に再起動します' });
+  // 背景で git pull → npm install → restart（再起動時に自動再取得される）
+  const cmd = 'git pull --ff-only && npm install --no-audit --no-fund && systemctl restart newsflow';
+  exec(cmd, { cwd: __dirname, timeout: 5 * 60 * 1000 }, (err, stdout, stderr) => {
+    if (err) {
+      console.error('update failed:', String((err && err.message) || err), stdout, stderr);
+      return;
+    }
+    console.log('update done:', stdout);
+  });
+});
+
+// ---- RSS フィード管理 API ----
+app.get('/api/feeds', (req, res) => {
+  // 指示書 §手順4 の { ok:true, feeds:[{ id,name,url,enabled,ok,items,error }] } 形式。
+  // 旧キー updatedAt は互換のため維持。
+  res.json({ ok: true, feeds: feedStates, updatedAt: lastUpdatedAt });
+});
+
+/** URL の重複判定用正規化（trim・末尾スラッシュ・大文字小文字の揺れを吸収） */
+function normalizeFeedUrl(url) {
+  return (url || '').trim().replace(/\/+$/, '').toLowerCase();
+}
+
+app.post('/api/feeds', (req, res) => {
+  const name = (req.body && req.body.name ? String(req.body.name) : '').trim();
+  const url = (req.body && req.body.url ? String(req.body.url) : '').trim();
+  if (!url || !/^https?:\/\//.test(url)) {
+    return res.status(400).json({ ok: false, error: 'url は http(s) 形式で指定してください' });
+  }
+  const normUrl = normalizeFeedUrl(url);
+  if (FEEDS.some((f) => normalizeFeedUrl(f.url) === normUrl)) {
+    return res.status(409).json({ ok: false, error: 'その URL は既に登録されています' });
+  }
+  const entry = { name: (name || url).slice(0, 100), url, enabled: true };
+  FEEDS.push(entry);
+  feedStates.push(freshFeedState(entry));
+  saveFeeds();
+  // 背景で即時取得（応答は待たない）
+  fetchAllFeeds().catch((e) => console.error('fetch after add failed:', e));
+  // 旧キー feeds は維持しつつ、指示書どおり feed（追加分）も返す
+  res.status(201).json({ ok: true, feed: freshFeedState(entry), feeds: feedStates });
+});
+
+app.delete('/api/feeds/:index', (req, res) => {
+  // 後方互換: 数値なら index、そうでなければ id（URL の SHA-1 先頭12桁）として解決
+  const raw = String(req.params.index || '');
+  let idx = -1;
+  if (/^\d+$/.test(raw)) {
+    idx = Number.parseInt(raw, 10);
+  } else {
+    idx = FEEDS.findIndex((f) => feedId(f.url) === raw);
+  }
+  if (!Number.isInteger(idx) || idx < 0 || idx >= FEEDS.length) {
+    return res.status(404).json({ ok: false, error: '指定のフィードが見つかりません' });
+  }
+  const removed = FEEDS.splice(idx, 1)[0];
+  const removedId = feedId(removed.url);
+  feedStates = feedStates.filter((s) => s.url !== removed.url && s.id !== removedId);
+  saveFeeds();
+  // 削除したフィード由来の記事が残らないよう store をクリアして再取得する
+  clearStore();
+  fetchAllFeeds().catch((e) => console.error('fetch after delete failed:', e));
+  res.json({ ok: true, removed, feeds: feedStates });
+});
+
+// ---- 記事本文オンデマンド API（フロントのフォールバック用） ----
+app.get('/api/article', async (req, res) => {
+  const url = (req.query.url || '').toString();
+  if (!url || !/^https?:\/\//.test(url)) {
+    return res.status(400).json({ ok: false, error: 'url パラメータが必要です' });
+  }
+  // store に本文があればそれを返す
+  for (const [, list] of store) {
+    const hit = list.find((e) => e.link === url && e.body);
+    if (hit) {
+      return res.json({ ok: true, url, body: hit.body, summary: hit.summary || summarizeText(hit.body), cached: true });
+    }
+  }
+  const body = await fetchArticleBody(url);
+  if (!body) return res.status(502).json({ ok: false, error: '本文を取得できませんでした' });
+  // store 側にも反映して永続化
+  for (const [, list] of store) {
+    for (const e of list) {
+      if (e.link === url) {
+        e.body = body;
+        e.summary = summarizeText(body);
+      }
+    }
+  }
+  saveStore();
+  res.json({ ok: true, url, body, summary: summarizeText(body), cached: false });
+});
+
+// 手動再取得（管理画面用。指示書準拠の /api/feeds/refresh が正規。/api/refresh は後方互換の別名）
+function handleRefresh(req, res) {
+  fetchAllFeeds().catch((e) => console.error('manual refresh failed:', e));
+  res.json({ ok: true, message: '再取得を開始しました', lastFetchAt: lastUpdatedAt, sources: feedStates });
+}
+app.post('/api/feeds/refresh', handleRefresh);
+app.post('/api/refresh', handleRefresh);
+
+process.on('unhandledRejection', (reason) => {
+  console.error('unhandledRejection:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err);
+});
+
+async function main() {
+  loadFeeds();
+  loadSettings();
+  applyIntervalSettings();
+  loadStore();
+  // 起動直後に1回取得（失敗してもサーバーは起動する）
+  await fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
+  scheduleFetch();
+
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[起動] http://0.0.0.0:${PORT} で待受中`);
+  });
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  app,
+  VERSION,
+  DEFAULT_SETTINGS,
+  ALLOWED_RATES,
+  getDefaultSettings,
+  normalizeSettings,
+  snapRate,
+  isValidRate,
+  isWithinHours,
+  filterByAge,
+  loadSettings,
+  saveSettings,
+  applyIntervalSettings,
+  controlEnabled,
+  get settings() { return settings; },
+  detectPrefectures,
+  PREFECTURES,
+  PREF_KEYWORDS,
+  FEEDS,
+  store,
+  buildPrefectures,
+  buildPlaylist,
+  buildGroups,
+  assignGroups,
+  interleaveAvoidSameGroup,
+  summarizeText,
+  bodyExcerpt,
+  titleSimilarity,
+  areSimilarTitles,
+  titleTokens,
+  isDateNumericToken,
+  contentTokens,
+  decodeEntities,
+  extractMetaContent,
+  extractArticleDescription,
+  fetchArticleBody,
+  feedId,
+  articleId,
+  loadFeeds,
+  saveFeeds,
+  // 指示書 §3.4 の関数名との両対応エイリアス（実装名が正規。テストはどちらでも参照可）
+  similarity: titleSimilarity,
+  clusterItems: assignGroups,
+  extractMeta: extractArticleDescription,
+};

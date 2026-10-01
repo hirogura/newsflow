@@ -1,0 +1,8 @@
+node_modules/
+data/
+# 個人データ（登録フィード等）は絶対にコミットしない
+data/feeds.json
+data/news.json
+data/settings.json
+*.log
+.ai-bridge/

@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ローカルニュース サイネージ</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000; color: #fff;
+    font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif;
+    overflow: hidden;
+  }
+  #header {
+    width: 100%; height: 5vh; min-height: 32px;
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 2.2vmin; color: #aaa;
+    padding: 0 2vmin;
+    border-bottom: 1px solid #222;
+  }
+  #header a { color: #8ab4ff; text-decoration: none; font-size: 2vmin; }
+  #header a:hover { text-decoration: underline; }
+  #voiceWarn {
+    display: none;
+    width: 100%;
+    background: #663300; color: #ffcc66;
+    font-size: 2.2vmin; text-align: center;
+    padding: 0.8vmin;
+    position: fixed; top: 0; left: 0; z-index: 5;
+  }
+  #main {
+    display: flex;
+    width: 100vw; height: 95vh;
+  }
+  /* 左: 記事内容 */
+  #left {
+    flex: 0 0 62%;
+    display: flex; flex-direction: column;
+    justify-content: center;
+    padding: 3vmin 4vmin;
+    overflow: hidden;
+  }
+  #prefRow { display: flex; align-items: center; gap: 1.5vmin; margin-bottom: 2vmin; flex-wrap: wrap; }
+  #pref {
+    display: inline-block;
+    font-size: 4vmin; font-weight: 700;
+    background: #c00; color: #fff;
+    border-radius: 1vmin; padding: 0.5vmin 3vmin;
+    letter-spacing: 0.1em;
+  }
+  #groupBadge {
+    display: none;
+    font-size: 2.4vmin; font-weight: 700;
+    background: #0a4d8c; color: #cfe8ff;
+    border-radius: 1vmin; padding: 0.5vmin 2vmin;
+  }
+  #title {
+    font-size: 4.6vmin; font-weight: 700;
+    line-height: 1.5;
+    word-break: break-word;
+    margin-bottom: 2.5vmin;
+  }
+  #body {
+    font-size: 2.9vmin; font-weight: 400;
+    line-height: 1.9;
+    color: #e8e8e8;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 6;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #body.empty { color: #777; }
+  #related {
+    margin-top: 2vmin;
+    font-size: 2.2vmin; color: #9fc3ff;
+    line-height: 1.7;
+  }
+  #related .rel-label { color: #6f9bd8; font-weight: 700; }
+  #meta {
+    margin-top: 2.5vmin;
+    font-size: 2.3vmin; color: #bbb;
+  }
+  #counter {
+    margin-top: 1vmin;
+    font-size: 2vmin; color: #666;
+  }
+  #hint {
+    margin-top: 1vmin;
+    font-size: 1.9vmin; color: #555;
+  }
+  /* 右: タイトル一覧 */
+  #right {
+    flex: 1;
+    border-left: 1px solid #222;
+    display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  #listHeader {
+    padding: 1.2vmin 2vmin;
+    font-size: 2.2vmin; color: #aaa;
+    border-bottom: 1px solid #222;
+    white-space: nowrap;
+  }
+  #list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1vmin;
+    scrollbar-width: thin;
+  }
+  .item {
+    padding: 1.2vmin 1.5vmin;
+    margin-bottom: 0.8vmin;
+    border-radius: 0.8vmin;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .item:hover { background: #141414; }
+  .item.active {
+    background: #1c2b44;
+    border-color: #2f6fd0;
+  }
+  .item .ip {
+    display: inline-block;
+    font-size: 1.9vmin; font-weight: 700;
+    background: #c00; color: #fff;
+    border-radius: 0.6vmin; padding: 0.1vmin 1.2vmin;
+    margin-right: 1vmin;
+  }
+  .item .it { font-size: 2.3vmin; line-height: 1.5; word-break: break-word; }
+  .item.active .it { font-weight: 700; }
+  .item .ig {
+    display: inline-block;
+    font-size: 1.8vmin; color: #9fc3ff;
+    background: #0a2c52; border-radius: 0.6vmin;
+    padding: 0.1vmin 1vmin; margin-left: 1vmin;
+  }
+  .item .is {
+    display: block;
+    font-size: 1.8vmin; color: #777;
+    margin-top: 0.4vmin;
+  }
+  #startOverlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.96);
+    display: flex; flex-direction: column;
+    justify-content: center; align-items: center;
+    z-index: 10; gap: 3vmin;
+  }
+  #startOverlay h1 { font-size: 5vmin; }
+  #startOverlay p { font-size: 2.6vmin; color: #bbb; max-width: 80vw; line-height: 1.8; text-align: center; }
+  #startBtn {
+    font-size: 4vmin; font-weight: 700;
+    padding: 2vmin 8vmin;
+    border-radius: 2vmin; border: none; cursor: pointer;
+    background: #c00; color: #fff;
+  }
+  #startBtn:hover { background: #e00; }
+  #err { color: #f66; font-size: 2.4vmin; margin-top: 2vmin; min-height: 1em; }
+  #ctrlRow { display: flex; gap: 1.5vmin; margin-top: 1vmin; flex-wrap: wrap; justify-content: center; }
+  #ctrlRow button {
+    font-size: 1.8vmin; padding: 0.8vmin 2.4vmin;
+    border-radius: 1vmin; border: 1px solid #555; cursor: pointer;
+    background: #222; color: #ccc;
+  }
+  #ctrlRow button:hover { background: #333; color: #fff; }
+  #ver { font-size: 1.8vmin; color: #666; margin-top: 1vmin; }
+  #ctrlMsg { font-size: 2vmin; color: #9fc3ff; min-height: 1em; }
+</style>
+</head>
+<body>
+<div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
+<div id="header">
+  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.1.0</span></span>
+  <span><span id="clock"></span>　<a href="/admin.html">RSS管理</a></span>
+</div>
+
+<div id="main">
+  <div id="left">
+    <div id="prefRow"><span id="pref">待機中</span><span id="groupBadge"></span></div>
+    <div id="title">ニュースを読み込んでいます…</div>
+    <div id="body" class="empty"></div>
+    <div id="related"></div>
+    <div id="meta"></div>
+    <div id="counter"></div>
+    <div id="hint">→キー: 次の記事 / ←キー: 前の記事 / 右の一覧クリックでも移動できます</div>
+  </div>
+  <div id="right">
+    <div id="listHeader">タイトル一覧（<span id="listCount">0</span>件）</div>
+    <div id="list"></div>
+  </div>
+</div>
+
+<div id="startOverlay">
+  <h1>ローカルニュース サイネージ</h1>
+  <p>最新ローカルニュースを24時間連続で読み上げます。読ませたいRSSを登録し個人で使用してください。読み上げはブラウザの機能で行なっているのでブラウザによって品質は変わります</p>
+  <button id="startBtn">ニュース再生を開始する</button>
+  <div id="ctrlRow">
+    <button id="settingsBtn" type="button">設定/RSSフィード管理</button>
+    <button id="updateBtn" type="button">アップデート</button>
+    <button id="rebootBtn" type="button">再起動</button>
+  </div>
+  <div id="ver">v.0.1.0</div>
+  <div id="ctrlMsg"></div>
+  <div id="err"></div>
+</div>
+
+<script>
+'use strict';
+// /api/news の playlist（類似分散済み・本文/要約付き）をその順序のまま再生する。
+// playlist が無い旧応答の場合は prefectures[] の展開にフォールバックする。
+
+let playlist = [];   // [{prefecture,title,link,source,pubDate,body,summary,groupId,groupSize}]
+let idx = 0;
+let started = false;
+let speaking = false; // 現在発話中か（キー操作の多重進行防止用ではない。単なる状態）
+let jaVoice = null;
+let wakeLock = null;
+// 読み上げ設定（/api/settings から取得。管理画面で変更可）
+let ttsEnabled = true;
+let ttsRate = 1.2;
+
+const elPref = document.getElementById('pref');
+const elGroup = document.getElementById('groupBadge');
+const elTitle = document.getElementById('title');
+const elBody = document.getElementById('body');
+const elRelated = document.getElementById('related');
+const elMeta = document.getElementById('meta');
+const elCounter = document.getElementById('counter');
+const elClock = document.getElementById('clock');
+const elOverlay = document.getElementById('startOverlay');
+const elErr = document.getElementById('err');
+const elVoiceWarn = document.getElementById('voiceWarn');
+const elList = document.getElementById('list');
+const elListCount = document.getElementById('listCount');
+
+setInterval(() => {
+  elClock.textContent = new Date().toLocaleString('ja-JP');
+}, 1000);
+
+function pickVoice() {
+  try {
+    const voices = speechSynthesis.getVoices() || [];
+    jaVoice =
+      voices.find(v => v.lang === 'ja-JP') ||
+      voices.find(v => v.lang && v.lang.startsWith('ja')) ||
+      null;
+    elVoiceWarn.style.display = (voices.length > 0 && !jaVoice) ? 'block' : 'none';
+  } catch (e) { jaVoice = null; }
+}
+if ('speechSynthesis' in window) {
+  pickVoice();
+  if (typeof speechSynthesis.onvoiceschanged !== 'undefined') {
+    speechSynthesis.onvoiceschanged = pickVoice;
+  } else if (typeof speechSynthesis.addEventListener !== 'undefined') {
+    speechSynthesis.addEventListener('voiceschanged', pickVoice);
+  }
+} else {
+  elVoiceWarn.style.display = 'block';
+}
+
+async function acquireWakeLock() {
+  try {
+    if ('wakeLock' in navigator && navigator.wakeLock.request) {
+      wakeLock = await navigator.wakeLock.request('screen');
+    }
+  } catch (e) { /* 失敗無視 */ }
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    try {
+      if ('speechSynthesis' in window) speechSynthesis.resume();
+    } catch (e) {}
+    acquireWakeLock();
+  }
+});
+
+function normalizePlaylist(data) {
+  if (Array.isArray(data.playlist) && data.playlist.length > 0) {
+    return data.playlist.map(p => ({
+      prefecture: p.prefecture || '',
+      title: p.title || '',
+      link: p.link || '',
+      source: p.source || '',
+      pubDate: p.pubDate || '',
+      body: p.body || '',
+      summary: p.summary || '',
+      groupId: p.groupId || null,
+      groupSize: p.groupSize || 1,
+    }));
+  }
+  // 旧応答フォールバック: prefectures[] を順に展開
+  const prefectures = Array.isArray(data.prefectures) ? data.prefectures : [];
+  const list = [];
+  for (const p of prefectures) {
+    const arr = Array.isArray(p.news) ? p.news : [];
+    for (const item of arr) {
+      list.push({
+        prefecture: p.prefecture,
+        title: item.title, link: item.link || '', source: item.source || '',
+        pubDate: item.pubDate || '', body: item.body || '', summary: item.summary || '',
+        groupId: item.groupId || null, groupSize: item.groupSize || 1,
+      });
+    }
+  }
+  return list;
+}
+
+async function loadNews() {
+  const res = await fetch('/api/news', { cache: 'no-store' });
+  if (!res.ok) throw new Error('API HTTP ' + res.status);
+  return normalizePlaylist(await res.json());
+}
+
+// 設定・バージョンの反映（起動時に1回。失敗時は既定値のまま）
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const s = (data && data.settings) || {};
+    if (typeof s.ttsEnabled === 'boolean') ttsEnabled = s.ttsEnabled;
+    if (Number.isFinite(Number(s.ttsRate))) ttsRate = Number(s.ttsRate);
+  } catch (e) { /* 既定値で継続 */ }
+}
+
+async function loadVersion() {
+  try {
+    const res = await fetch('/api/version', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const disp = (data && data.display) || (data && data.version ? 'v.' + data.version : null);
+    if (disp) {
+      const a = document.getElementById('ver');
+      const b = document.getElementById('verHead');
+      if (a) a.textContent = disp;
+      if (b) b.textContent = disp;
+    }
+  } catch (e) {}
+}
+
+// 本文が空の項目は /api/article で1回だけ補完を試みる（次回以降の読み上げ用に蓄える）
+async function backfillBody(item) {
+  if (item.body || !item.link) return;
+  try {
+    const res = await fetch('/api/article?url=' + encodeURIComponent(item.link), { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data && data.body) {
+      item.body = data.body;
+      item.summary = data.summary || '';
+      renderBody(item);
+    }
+  } catch (e) { /* 失敗無視: タイトルのみ読み上げ */ }
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function buildList() {
+  elList.innerHTML = '';
+  elListCount.textContent = String(playlist.length);
+  playlist.forEach((cur, i) => {
+    const div = document.createElement('div');
+    div.className = 'item' + (i === idx ? ' active' : '');
+    div.dataset.i = String(i);
+    let inner = '<span class="ip">' + esc(cur.prefecture) + '</span>' +
+      '<span class="it">' + esc(cur.title) + '</span>';
+    if (cur.groupSize > 1) {
+      inner += '<span class="ig">関連' + cur.groupSize + '件</span>';
+    }
+    inner += '<span class="is">' + esc(cur.source) + '</span>';
+    div.innerHTML = inner;
+    div.addEventListener('click', () => { jumpTo(i); });
+    elList.appendChild(div);
+  });
+}
+
+function highlightCurrent() {
+  const children = elList.children;
+  for (let i = 0; i < children.length; i++) {
+    children[i].classList.toggle('active', i === idx);
+  }
+  // 読み上げ中の項目が常に中央に来るよう自動スクロール
+  const active = children[idx];
+  if (active && typeof active.scrollIntoView === 'function') {
+    active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function renderBody(cur) {
+  const text = cur.summary || cur.body;
+  if (text) {
+    elBody.textContent = text;
+    elBody.classList.remove('empty');
+  } else {
+    elBody.textContent = '（本文を取得できませんでした。タイトルのみ読み上げます）';
+    elBody.classList.add('empty');
+  }
+}
+
+function showCurrent() {
+  if (playlist.length === 0) {
+    elPref.textContent = '待機中';
+    elTitle.textContent = 'ニュースを取得中…';
+    elBody.textContent = '';
+    elRelated.textContent = '';
+    elMeta.textContent = '';
+    elCounter.textContent = '';
+    elGroup.style.display = 'none';
+    return;
+  }
+  const cur = playlist[idx];
+  elPref.textContent = cur.prefecture;
+  elTitle.textContent = cur.title;
+  renderBody(cur);
+  if (cur.groupSize > 1) {
+    elGroup.style.display = 'inline-block';
+    elGroup.textContent = '関連記事 ' + cur.groupSize + '件';
+    // ひとまとめ表示: 同じ groupId の別記事タイトルを最大4件まで列挙
+    const sibs = playlist.filter(p => p.groupId === cur.groupId && p !== cur).slice(0, 4);
+    elRelated.innerHTML = '<span class="rel-label">同じ話題: </span>' +
+      sibs.map(s => esc(s.prefecture + ' / ' + s.title)).join('<br>');
+  } else {
+    elGroup.style.display = 'none';
+    elRelated.textContent = '';
+  }
+  elMeta.textContent = [cur.source, cur.pubDate ? new Date(cur.pubDate).toLocaleString('ja-JP') : '']
+    .filter(Boolean).join(' / ');
+  elCounter.textContent = '全体 ' + (idx + 1) + '/' + playlist.length;
+  highlightCurrent();
+}
+
+function speakText() {
+  const cur = playlist[idx];
+  // 読み上げ文: 都道府県 + タイトル + 本文要約（3行程度・サーバー側で要約済み）
+  const extra = cur.summary || cur.body;
+  return cur.prefecture + '。' + cur.title + (extra ? '。' + extra : '');
+}
+
+function speak(text, onend) {
+  showCurrent();
+  // 読み上げ Off の場合は発話せず一定時間表示して次へ
+  if (!ttsEnabled) {
+    setTimeout(onend, 4000);
+    return;
+  }
+  if (!('speechSynthesis' in window)) {
+    setTimeout(onend, 8000);
+    return;
+  }
+  try { speechSynthesis.cancel(); } catch (e) {}
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ja-JP';
+  u.rate = ttsRate;
+  u.pitch = 1.0;
+  if (jaVoice) u.voice = jaVoice;
+  const resumeTimer = setInterval(() => {
+    try { if (speechSynthesis.speaking) speechSynthesis.resume(); } catch (e) {}
+  }, 10000);
+  const wrappedEnd = () => { clearInterval(resumeTimer); onend(); };
+  u.onend = wrappedEnd;
+  u.onerror = wrappedEnd;
+  try {
+    speechSynthesis.speak(u);
+  } catch (e) { wrappedEnd(); }
+}
+
+function stopSpeech() {
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+}
+
+async function playAt(i) {
+  if (!started) return;
+  if (i < 0) i = 0;
+  if (i >= playlist.length) {
+    // 一周したら最新データを再取得してエンドレスループ
+    try {
+      const fresh = await loadNews();
+      if (fresh.length > 0) { playlist = fresh; buildList(); }
+    } catch (e) { console.warn('reload failed:', e); }
+    i = 0;
+    if (playlist.length === 0) {
+      showCurrent();
+      setTimeout(() => playAt(0), 60000);
+      return;
+    }
+  }
+  idx = i;
+  const cur = playlist[idx];
+  backfillBody(cur); // 非同期で補完（表示・次周に反映）
+  speaking = true;
+  speak(speakText(), () => {
+    speaking = false;
+    playAt(idx + 1);
+  });
+}
+
+function jumpTo(i) {
+  if (!started || playlist.length === 0) return;
+  if (i < 0) i = 0;
+  if (i >= playlist.length) i = playlist.length - 1;
+  stopSpeech();
+  // speak() 内の onend が二重発火しないよう少し待ってから再生する
+  setTimeout(() => playAt(i), 60);
+}
+
+// 右キー=次 / 左キー=前
+document.addEventListener('keydown', (e) => {
+  if (!started) return;
+  if (e.key === 'ArrowRight') { e.preventDefault(); jumpTo(idx + 1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); jumpTo(idx - 1); }
+});
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  elErr.textContent = '';
+  await loadSettings();
+  try {
+    playlist = await loadNews();
+  } catch (e) {
+    console.error(e);
+    elErr.textContent = 'ニュースの取得に失敗しました: ' + e.message;
+    return;
+  }
+  if (playlist.length === 0) {
+    elErr.textContent = 'ニュースを取得中… 60秒後にもう一度お試しください。';
+    showCurrent();
+    setTimeout(async () => {
+      if (started) return;
+      try {
+        const retry = await loadNews();
+        if (retry.length > 0) {
+          playlist = retry;
+          started = true;
+          elOverlay.style.display = 'none';
+          acquireWakeLock();
+          buildList();
+          playAt(0);
+        }
+      } catch (e) {}
+    }, 60000);
+    return;
+  }
+  started = true;
+  elOverlay.style.display = 'none';
+  acquireWakeLock();
+  try {
+    const u = new SpeechSynthesisUtterance(' ');
+    u.lang = 'ja-JP';
+    speechSynthesis.speak(u);
+    speechSynthesis.cancel();
+  } catch (e) {}
+  buildList();
+  playAt(0);
+  try {
+    if (document.documentElement.requestFullscreen) {
+      await document.documentElement.requestFullscreen().catch(() => {});
+    }
+  } catch (e) {}
+});
+
+// トップ下部の小さな3ボタン
+document.getElementById('settingsBtn').addEventListener('click', () => {
+  window.location.href = '/admin.html';
+});
+document.getElementById('updateBtn').addEventListener('click', async () => {
+  const msg = document.getElementById('ctrlMsg');
+  if (!confirm('GitHub から更新を取得し、再起動しますか？')) return;
+  msg.textContent = 'アップデート中…（git pull → npm install → 再起動）';
+  try {
+    const res = await fetch('/api/update', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    msg.textContent = '更新を開始しました。再起動後に自動で最新ニュースを取得します。数十秒後にページをリロードしてください。';
+    setTimeout(() => window.location.reload(), 45000);
+  } catch (e) {
+    msg.textContent = 'アップデートに失敗しました: ' + e.message;
+  }
+});
+document.getElementById('rebootBtn').addEventListener('click', async () => {
+  const msg = document.getElementById('ctrlMsg');
+  if (!confirm('サービスを再起動しますか？（再起動時に自動再取得します）')) return;
+  msg.textContent = '再起動中…';
+  try {
+    const res = await fetch('/api/restart', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    msg.textContent = '再起動を開始しました。30秒ほど待ってリロードしてください。';
+    setTimeout(() => window.location.reload(), 30000);
+  } catch (e) {
+    msg.textContent = '再起動に失敗しました: ' + e.message;
+  }
+});
+
+// 起動前のプレビュー表示
+loadSettings().then(loadVersion);
+loadNews().then((list) => {
+  if (list.length > 0) {
+    playlist = list;
+    idx = 0;
+    buildList();
+    showCurrent();
+  } else {
+    showCurrent();
+  }
+}).catch(() => { showCurrent(); });
+</script>
+</body>
+</html>

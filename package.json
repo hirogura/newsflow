@@ -1,0 +1,20 @@
+{
+  "name": "newsflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (MVP)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/grouping.test.js && node test/settings.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^4.22.3",
+    "rss-parser": "^3.13.0"
+  }
+}

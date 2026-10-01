@@ -1,0 +1,204 @@
+# newsflow — 47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (v.0.1.0)
+
+Ubuntu 26.04 LXD コンテナ内で RSS からローカルニュースを定期収集し、
+ブラウザの Web Speech API で日本語 TTS として24時間ノンストップで読み上げる
+フルスクリーン・サイネージの MVP です。
+
+- バックエンド: Node.js + Express、ポート **3364**、15分ごとに RSS 取得・都道府県仕分け
+- フロント: `public/index.html`（単一ファイル、黒背景・白文字・特大フォント）
+- API: `GET /api/news`（§4.2.2 固定契約）、`GET /api/health`
+
+Yahoo! RSS は個人利用限定です。再配信・公開はせず、個人のローカル閲覧に限定してください。
+
+## 1. Node.js の確認（本コンテナは導入済み。未導入環境向けの参考手順も併記）
+
+```bash
+node -v   # v22.23.3 を確認
+npm -v    # 10.9.9 を確認
+# 未導入の場合（参考）:
+sudo apt-get update && sudo apt-get install -y nodejs npm
+```
+
+## 2. 依存導入
+
+```bash
+cd /opt/newsflow
+npm install
+```
+
+## 3. 起動
+
+```bash
+cd /opt/newsflow
+PORT=3364 npm start
+# 常駐させる場合
+nohup env PORT=3364 npm start > /var/log/newsflow.log 2>&1 &
+```
+
+## 4. systemd 常駐化（24時間運用）: `/etc/systemd/system/newsflow.service`
+
+実際に設置している unit と同一内容（`User=` は指定しない。root 実行のまま `data/` へ書き込む運用）:
+
+```ini
+[Unit]
+Description=Newsflow digital signage (local news TTS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/newsflow
+Environment=PORT=3364
+ExecStart=/usr/bin/node /opt/newsflow/server.js
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now newsflow
+sudo systemctl --no-pager --full status newsflow
+systemctl is-enabled newsflow   # => enabled
+systemctl is-active newsflow    # => active
+journalctl -u newsflow -n 30 --no-pager
+# ログを追いかける場合
+journalctl -u newsflow -f
+# 自動復旧の確認（kill -9 しても Restart=always で数秒以内に復帰する）
+MAINPID=$(systemctl show -p MainPID --value newsflow); echo "pid=$MAINPID"
+sudo kill -9 "$MAINPID"; sleep 8
+systemctl show -p MainPID --value newsflow   # => 新しい PID（元と異なる）
+```
+
+## 5. コンテナ内での確認
+
+```bash
+curl -s http://127.0.0.1:3364/api/health
+curl -s http://127.0.0.1:3364/api/news | head -c 400
+```
+
+## 6. ブラウザで閲覧
+
+- `http://<host>:3364/` をブラウザで開きます。
+- トップ画面の版表示 `v.0.1.0` のほか、「ニュース再生を開始する」ボタンの下に
+  小さな「設定/RSSフィード管理」「アップデート」「再起動」ボタンを用意しています。
+
+開いたら「ニュース再生を開始する」ボタンをクリックしてください
+（ブラウザの自動再生規制のため1回クリックが必要です）。
+
+## 7. ポート開放
+
+コンテナ内 ufw は inactive のため原則不要です。
+有効化している場合のみ:
+
+```bash
+sudo ufw allow 3364/tcp
+```
+
+LXD でホスト側ポートへプロキシする場合（**ホストで実行**、`<container>` はコンテナ名）:
+
+```bash
+lxc config device add <container> newsflow proxy listen=tcp:0.0.0.0:3364 connect=tcp:127.0.0.1:3364
+```
+
+## 8. ブラウザ側 TTS の前提（音声が出ない場合の対処）
+
+ブラウザが動作するマシンで日本語音声基盤を導入してください。
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install -y speech-dispatcher espeak-ng
+# Arch 系
+sudo pacman -S speech-dispatcher espeak-ng
+```
+
+導入後ブラウザを再起動してください。
+`chrome://settings` の「音声合成」または OS の音声設定で
+日本語音声が有効か確認してください。
+
+## 補足: 既知の制約・改善余地
+
+- 都道府県判定は部分一致のため誤検知があり得ます
+  （例: 姓としての「山口」「香川」「長野」「石川」「千葉」）。MVP では許容します。
+- ただし「東京都」→「京都府」の誤判定のみは必須で回避しています
+  （京都府の判定に `/(?<!東)京都/` を使用）。
+- フィードは `https://news.yahoo.co.jp/rss/topics/*.xml` と
+  `https://assets.wor.jp/rss/rdf/yn*.rdf` を使用しています。
+  `www.47news.jp/rss/*` は 403 で取得不可のため使用しません。
+- 本文取得に失敗した記事はタイトルのみ読み上げます（サーバーは落とさず継続）。
+  `og:description` / `meta[name=description]` が無いページでは `<p>` 抽出に
+  フォールバックしますが、ナビ・メニュー等のノイズが混じる場合があります。
+- 類似判定は閾値依存です。過剰統合（別ニュースの統合）や未統合があれば
+  `areSimilarTitles()` の複合ルール（内容語トークンの Jaccard＋包含率）と
+  `isDateNumericToken()` の除外集合で調整してください。
+  日付・数字トークン（例: `10月` `1日`）だけの一致では統合されません。
+
+## RSS 管理画面
+
+- `http://<host>:3364/admin.html` をブラウザで開きます（サイネージのヘッダー「RSS管理」リンクや
+  トップの「設定/RSSフィード管理」ボタンからも移動可）。
+- 登録中のフィード一覧（取得状態 OK/失敗・件数・無効表示）、追加フォーム（名前・URL）、
+  削除ボタン（確認後に削除）、「今すぐ再取得する」ボタン（`POST /api/feeds/refresh`）を提供します。
+- フィード定義は `data/feeds.json` に永続化されます。削除時は store をクリアして
+  再取得するため、削除したフィード由来の記事は一覧から消えます（件数は取得周期で回復）。
+- 登録フィード（`data/feeds.json` 等の個人データ）は `.gitignore` で除外されており、
+  リポジトリにはコミットされません。利用者自身で追加してください。
+- エクスポート: `GET /api/feeds/export`（管理画面のボタンで JSON 保存）。
+- インポート: `POST /api/feeds/import`（`{ feeds, mode: "replace"|"merge" }`）。
+- 表示・読み上げ設定: `GET/PUT /api/settings`
+  （取得間隔 5〜180分 / N時間以内の表示 1〜168時間 / 読み上げ On-Off / 速度5段階 0.8,1.0,1.2,1.4,1.6）。
+
+## トップ画面の操作ボタン
+
+- 「設定/RSSフィード管理」: `/admin.html` を表示します。
+- 「アップデート」: `POST /api/update` で `git pull` → `npm install` → サービス再起動を
+  実行します（再起動時に自動再取得）。完了まで数十秒かかるため、画面の案内に従ってリロードしてください。
+- 「再起動」: `POST /api/restart` で systemd サービス `newsflow` を再起動します。
+- 制御系 API は環境変数 `DISABLE_CONTROL=1` で無効化できます（無効時は 403 を返します）。
+- バージョンは `GET /api/version`（`{ version, display: "v.0.1.0" }`）でも取得できます。
+
+## ライセンス
+
+MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照してください。
+
+## 操作方法（サイネージ画面）
+
+- 開いたら「ニュース再生を開始する」をクリック（ブラウザの自動再生規制のため1回必要）。
+- `→` キーで次の記事へスキップ、`←` キーで前の記事へ戻ります（連打可。手動移動後も自動再生を継続）。
+- 右ペインのタイトル一覧は読み上げ中の行がハイライトされ、常にほぼ中央へ自動スクロールします。
+- 左ペイン中央に都道府県バッジ・タイトル・本文（長い場合は省略表示）・媒体/日時・関連記事を表示し、
+  「都道府県。タイトル。本文3行程度」を読み上げます。
+
+## 本文取得
+
+- RSS には本文が無いため、記事ページを `fetch`（ブラウザ相当 UA・10秒タイムアウト・同時5件・ベストエフォート）して抽出しています。
+  優先度: `og:description`（Yahoo）→ `meta[name=description]`（47NEWS）→ JSON-LD `NewsArticle.description` → 長めの `<p>`。
+- 取得した本文は `link` をキーにキャッシュし、読み上げ用に先頭3文・上限文字数で丸めた
+  `summary` / `bodyExcerpt` を `/api/news` で配信します。本文が無い記事はタイトルのみ読み上げます。
+- 環境変数 `BODY_FETCH=0` で記事本文の取得を無効化できます。
+
+## 類似記事グループ化
+
+- タイトル類似度は内容語トークン（文字バイグラム＋語彙。日付・時刻・数字のみのトークンは除外）の
+  Jaccard 係数 `J` と包含率 `cont` の複合ルール `areSimilarTitles()` で判定します。
+  完全一致・8文字以上の包含・同一 link は類似とみなします。
+- グループ化は貪欲クラスタリング（代表との比較のみ。連鎖巨大クラスタなし）で行い、
+  再生用 `playlist` は同一 `groupId` が連続しないよう分散配置します（`interleaveAvoidSameGroup`）。
+- 調整方法: `SIMILARITY_THRESHOLD` 環境変数ではなくコード内の複合ルール
+  （`j >= 0.3` / `j >= 0.12 && cont >= 0.24 && inter >= 3`＋内容語 2 件以上の必須条件）の
+  閾値・件数を変更し、`npm test` と本番 `groups` の全走査で確認します。
+
+## 環境変数一覧
+
+| 変数 | 既定 | 意味 |
+|---|---|---|
+| `PORT` | `3364` | 待受ポート |
+| `FETCH_INTERVAL_MS` | `900000` | 取得間隔（15 分。現行はコード内定数） |
+| `MAX_PER_PREF` | `10` | 県あたり保持件数（現行はコード内定数） |
+| `BODY_FETCH` | `1` | 記事本文の取得（`0` で無効。現行は常時取得） |
+| `BODY_READ_CHARS` | `220` | 読み上げ本文の最大文字数（3 行相当の目安） |
+| `SIMILARITY_THRESHOLD` | `0.5` | 類似判定しきい値の目安（現行は複合ルールで等価管理） |
+| `BODY_CACHE_MAX` | `2000` | 本文キャッシュ最大件数（現行は 1000 件で古いものから破棄） |

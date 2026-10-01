@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RSS管理 - newsflow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #111; color: #eee;
+    font-family: "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic", Meiryo, sans-serif;
+    padding: 24px; max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 24px; margin-bottom: 4px; }
+  .sub { color: #999; font-size: 13px; margin-bottom: 20px; }
+  a { color: #8ab4ff; }
+  #status {
+    background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+    padding: 12px 16px; margin-bottom: 20px; font-size: 13px; color: #bbb;
+  }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid #2a2a2a; font-size: 14px; }
+  th { color: #999; font-weight: 400; font-size: 12px; }
+  td.url { word-break: break-all; color: #9fc3ff; font-size: 12px; }
+  .ok { color: #7dd87d; } .ng { color: #f66; } .unknown { color: #999; }
+  button {
+    background: #2a2a2a; color: #eee; border: 1px solid #444;
+    border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 14px;
+  }
+  button:hover { background: #3a3a3a; }
+  button.danger { background: #5a1818; border-color: #a33; }
+  button.danger:hover { background: #7a2020; }
+  button.primary { background: #0a4d8c; border-color: #2f6fd0; }
+  button.primary:hover { background: #0d61ad; }
+  form.add {
+    background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+    padding: 16px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;
+  }
+  form.add label { font-size: 13px; color: #bbb; }
+  form.add input {
+    background: #0d0d0d; color: #eee; border: 1px solid #444;
+    border-radius: 6px; padding: 8px 10px; font-size: 14px; width: 100%;
+  }
+  form.add select {
+    background: #0d0d0d; color: #eee; border: 1px solid #444;
+    border-radius: 6px; padding: 8px 10px; font-size: 14px;
+  }
+  #msg { min-height: 1.5em; font-size: 14px; margin-bottom: 12px; }
+  #msg.err { color: #f66; } #msg.ok { color: #7dd87d; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<h1>RSSフィード管理</h1>
+<div class="sub"><a href="/">← サイネージに戻る</a></div>
+<div id="status">読み込み中…</div>
+<div id="msg"></div>
+
+<h2 style="font-size:16px;margin-bottom:10px;">登録中のフィード</h2>
+<table>
+  <thead><tr><th>#</th><th>名前</th><th>URL</th><th>状態</th><th>操作</th></tr></thead>
+  <tbody id="feedRows"><tr><td colspan="5">読み込み中…</td></tr></tbody>
+</table>
+
+<h2 style="font-size:16px;margin-bottom:10px;">フィードを追加</h2>
+<form class="add" id="addForm">
+  <label>名前（任意・空欄ならURLを表示名にします）<input id="fName" type="text" maxlength="100" placeholder="例: 地元新聞 RSS" /></label>
+  <label>URL（必須・http/https）<input id="fUrl" type="url" required placeholder="https://example.com/rss.xml" /></label>
+  <div><button class="primary" type="submit">追加する</button></div>
+</form>
+
+<div class="row">
+  <button id="refreshBtn">今すぐ再取得する</button>
+  <span style="font-size:12px;color:#888;">追加・削除後は自動で再取得が始まります</span>
+</div>
+
+<h2 style="font-size:16px;margin:24px 0 10px;">表示・読み上げ設定</h2>
+<form class="add" id="settingsForm">
+  <label>RSS取得間隔（分・5〜180）<input id="sInterval" type="number" min="5" max="180" step="1" /></label>
+  <label>表示対象の新しさ（N時間以内のニュースを表示・1〜168）<input id="sMaxAge" type="number" min="1" max="168" step="1" /></label>
+  <label>読み上げ
+    <select id="sTts">
+      <option value="on">On（読み上げる）</option>
+      <option value="off">Off（表示のみ）</option>
+    </select>
+  </label>
+  <label>読み上げ速度（5段階）
+    <select id="sRate">
+      <option value="0.8">1: ゆっくり (0.8)</option>
+      <option value="1.0">2: ややゆっくり (1.0)</option>
+      <option value="1.2">3: ふつう (1.2)</option>
+      <option value="1.4">4: やや速い (1.4)</option>
+      <option value="1.6">5: 速い (1.6)</option>
+    </select>
+  </label>
+  <div><button class="primary" type="submit">設定を保存する</button></div>
+</form>
+
+<h2 style="font-size:16px;margin:24px 0 10px;">エクスポート / インポート</h2>
+<div class="row">
+  <button id="exportBtn">フィードをエクスポート (JSON)</button>
+  <span style="font-size:12px;color:#888;">登録フィードをJSONファイルで保存します</span>
+</div>
+<form class="add" id="importForm">
+  <label>インポート方式
+    <select id="importMode">
+      <option value="replace">置き換え（現在の登録を全て置換）</option>
+      <option value="merge">追加（重複URLはスキップ）</option>
+    </select>
+  </label>
+  <label>JSONファイルを選択 <input id="importFile" type="file" accept="application/json,.json" /></label>
+  <div><button type="submit">インポートする</button></div>
+</form>
+
+<script>
+'use strict';
+const elRows = document.getElementById('feedRows');
+const elStatus = document.getElementById('status');
+const elMsg = document.getElementById('msg');
+
+function showMsg(text, cls) {
+  elMsg.textContent = text;
+  elMsg.className = cls || '';
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+async function loadAll() {
+  const [feedsRes, healthRes, newsRes] = await Promise.all([
+    fetch('/api/feeds', { cache: 'no-store' }),
+    fetch('/api/health', { cache: 'no-store' }),
+    fetch('/api/news', { cache: 'no-store' }),
+  ]);
+  if (!feedsRes.ok) throw new Error('feeds HTTP ' + feedsRes.status);
+  const feedsData = await feedsRes.json();
+  const health = healthRes.ok ? await healthRes.json() : {};
+  const news = newsRes.ok ? await newsRes.json() : {};
+  const states = Array.isArray(news.sources) ? news.sources : [];
+  const byUrl = new Map(states.map(s => [s.url, s]));
+
+  elStatus.textContent =
+    '最終取得: ' + (health.lastFetchAt ? new Date(health.lastFetchAt).toLocaleString('ja-JP') : '—') +
+    ' / 保持件数: ' + (health.totalNews != null ? health.totalNews : '—') +
+    ' / フィード数: ' + feedsData.feeds.length;
+
+  elRows.innerHTML = '';
+  feedsData.feeds.forEach((f, i) => {
+    // 新フィールド（/api/feeds の ok/items/error/enabled）を優先し、
+    // 無ければ従来どおり /api/news の sources を参照する（後方互換）
+    const st = (f && (f.ok !== undefined || f.items !== undefined || f.error || f.enabled === false))
+      ? f
+      : byUrl.get(f.url);
+    const stHtml = !st ? '<span class="unknown">未取得</span>'
+      : (st.enabled === false) ? '<span class="unknown">無効</span>'
+      : st.ok ? '<span class="ok">OK（' + st.items + '件）</span>'
+      : '<span class="ng">失敗: ' + esc(st.error || '') + '</span>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + (f.id ? esc(String(f.id).slice(0, 8)) : i) + '</td><td>' + esc(f.name) + '</td>' +
+      '<td class="url">' + esc(f.url) + '</td><td>' + stHtml + '</td>';
+    const td = document.createElement('td');
+    const btn = document.createElement('button');
+    btn.className = 'danger';
+    btn.textContent = '削除';
+    btn.addEventListener('click', () => removeFeed(f.id != null ? f.id : i, f.name));
+    td.appendChild(btn);
+    tr.appendChild(td);
+    elRows.appendChild(tr);
+  });
+}
+
+async function removeFeed(idOrIndex, name) {
+  if (!confirm('「' + name + '」を削除しますか？')) return;
+  showMsg('');
+  try {
+    const res = await fetch('/api/feeds/' + encodeURIComponent(idOrIndex), { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    showMsg('削除しました: ' + name, 'ok');
+    await loadAll();
+  } catch (e) {
+    showMsg('削除に失敗しました: ' + e.message, 'err');
+  }
+}
+
+document.getElementById('addForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showMsg('');
+  const name = document.getElementById('fName').value.trim();
+  const url = document.getElementById('fUrl').value.trim();
+  try {
+    const res = await fetch('/api/feeds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, url }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    showMsg('追加しました。再取得を開始しています…', 'ok');
+    document.getElementById('fName').value = '';
+    document.getElementById('fUrl').value = '';
+    await loadAll();
+  } catch (e2) {
+    showMsg('追加に失敗しました: ' + e2.message, 'err');
+  }
+});
+
+document.getElementById('refreshBtn').addEventListener('click', async () => {
+  showMsg('');
+  try {
+    const res = await fetch('/api/feeds/refresh', { method: 'POST' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    showMsg('再取得を開始しました。数十秒後に状態が更新されます。', 'ok');
+    setTimeout(loadAll, 20000);
+  } catch (e) {
+    showMsg('再取得の開始に失敗しました: ' + e.message, 'err');
+  }
+});
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const s = (data && data.settings) || {};
+    if (s.fetchIntervalMinutes != null) document.getElementById('sInterval').value = s.fetchIntervalMinutes;
+    if (s.maxAgeHours != null) document.getElementById('sMaxAge').value = s.maxAgeHours;
+    document.getElementById('sTts').value = s.ttsEnabled === false ? 'off' : 'on';
+    if (s.ttsRate != null) document.getElementById('sRate').value = String(s.ttsRate);
+  } catch (e) { /* 無視 */ }
+}
+
+document.getElementById('settingsForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showMsg('');
+  const payload = {
+    fetchIntervalMinutes: parseInt(document.getElementById('sInterval').value, 10),
+    maxAgeHours: Number(document.getElementById('sMaxAge').value),
+    ttsEnabled: document.getElementById('sTts').value === 'on',
+    ttsRate: Number(document.getElementById('sRate').value),
+  };
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    showMsg('設定を保存しました（取得間隔 ' + data.settings.fetchIntervalMinutes + '分 / ' +
+      data.settings.maxAgeHours + '時間以内を表示 / 読み上げ' +
+      (data.settings.ttsEnabled ? 'On' : 'Off') + ' / 速度' + data.settings.ttsRate + '）。', 'ok');
+  } catch (e2) {
+    showMsg('設定の保存に失敗しました: ' + e2.message, 'err');
+  }
+});
+
+document.getElementById('exportBtn').addEventListener('click', async () => {
+  showMsg('');
+  try {
+    const res = await fetch('/api/feeds/export', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'newsflow-feeds.json';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    showMsg('エクスポートしました（' + (data.feeds || []).length + '件）。', 'ok');
+  } catch (e) {
+    showMsg('エクスポートに失敗しました: ' + e.message, 'err');
+  }
+});
+
+document.getElementById('importForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showMsg('');
+  const file = document.getElementById('importFile').files[0];
+  if (!file) { showMsg('JSONファイルを選択してください。', 'err'); return; }
+  try {
+    const text = await file.text();
+    const parsed = JSON.parse(text);
+    const feeds = Array.isArray(parsed) ? parsed : parsed.feeds;
+    if (!Array.isArray(feeds)) throw new Error('feeds 配列が見つかりません');
+    const mode = document.getElementById('importMode').value;
+    const res = await fetch('/api/feeds/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feeds, mode }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    showMsg('インポートしました（' + data.imported + '件・合計' + data.total + '件）。再取得を開始しています…', 'ok');
+    await loadAll();
+  } catch (e2) {
+    showMsg('インポートに失敗しました: ' + e2.message, 'err');
+  }
+});
+
+loadSettings();
+loadAll().catch((e) => {
+  elRows.innerHTML = '<tr><td colspan="5">読み込みに失敗しました: ' + esc(e.message) + '</td></tr>';
+});
+</script>
+</body>
+</html>
