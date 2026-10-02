@@ -276,7 +276,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.1.0</div>
+  <div id="ver">v.1.2.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -444,6 +444,7 @@ function normalizePlaylist(data) {
       groupSize: p.groupSize || 1,
       id: p.id || null,
       image: p.image || '',
+      related: Array.isArray(p.related) ? p.related : [],
     }));
   }
   // 旧応答フォールバック: prefectures[] を順に展開
@@ -458,6 +459,7 @@ function normalizePlaylist(data) {
         pubDate: item.pubDate || '', body: item.body || '', summary: item.summary || '',
         groupId: item.groupId || null, groupSize: item.groupSize || 1,
         id: item.id || null, image: item.image || '',
+        related: Array.isArray(item.related) ? item.related : [],
       });
     }
   }
@@ -601,10 +603,13 @@ function showCurrent() {
   if (cur.groupSize > 1) {
     elGroup.style.display = 'inline-block';
     elGroup.textContent = '関連記事 ' + cur.groupSize + '件';
-    // ひとまとめ表示: 同じ groupId の別記事タイトルを最大4件まで列挙
-    const sibs = playlist.filter(p => p.groupId === cur.groupId && p !== cur).slice(0, 4);
+    // ひとまとめ表示: サーバーが付けた related（ suppressed された類似記事）を最大4件まで列挙。
+    // playlist 自体は重複排除済み（同一グループは最初の1件のみ）のため、playlist 内検索はしない。
+    const rel = (Array.isArray(cur.related) && cur.related.length > 0)
+      ? cur.related
+      : playlist.filter(p => p.groupId != null && p.groupId === cur.groupId && p !== cur).slice(0, 4);
     elRelated.innerHTML = '<span class="rel-label">同じ話題: </span>' +
-      sibs.map(s => esc(s.prefecture + ' / ' + s.title)).join('<br>');
+      rel.slice(0, 4).map(s => esc(((s.prefecture ? s.prefecture + ' / ' : '') + (s.title || '')))).join('<br>');
   } else {
     elGroup.style.display = 'none';
     elRelated.textContent = '';
@@ -755,6 +760,74 @@ function jumpTo(i) {
 // ---- 再生中の新規記事取り込み ----
 // /api/news を定期取得し、未読の記事だけを「数個先」に差し込む。
 // 現在の読み上げ位置 (idx) は動かさないため、聞いている途中で表示が飛ばない。
+// サーバーは playlist を重複排除済み（同一グループは最初の1件のみ）で返すため、
+// 取り込み時も既読との類似記事は除外する（県を跨いだ類似の再掲防止）。
+function normalizeTitleFront(t) {
+  return (t || '').trim().replace(/[ \t　]+/g, ' ');
+}
+function stripBracketsFront(s) {
+  return (s || '').replace(/【[^】]*】/g, '').replace(/［[^］]*］/g, '').replace(/\[[^\]]*\]/g, '');
+}
+function titleTokensFront(title) {
+  const t = stripBracketsFront(normalizeTitleFront(title))
+    .replace(/[、。！？「」『』（）()・―—\-:：;；\/|｜@＠#＃★☆※・]/g, ' ')
+    .trim();
+  if (!t) return new Set();
+  const tokens = new Set();
+  const compact = t.replace(/\s+/g, '');
+  for (let i = 0; i + 1 < compact.length; i++) {
+    tokens.add(compact.slice(i, i + 2));
+  }
+  for (const w of t.split(/\s+/)) {
+    if (w.length >= 2) tokens.add(w);
+  }
+  return tokens;
+}
+function isDateNumericTokenFront(tok) {
+  if (!tok) return true;
+  if (!/[0-9０-９]/.test(tok)) return false;
+  return /^[0-9０-９年月日時分秒曜週日号付紙面掲版載第／\/．\.\-\-―—:：,，、\s\(\)（）［］【\]()]+$/.test(tok);
+}
+function contentTokensFront(title) {
+  const all = titleTokensFront(title);
+  const out = new Set();
+  for (const t of all) {
+    if (!isDateNumericTokenFront(t)) out.add(t);
+  }
+  return out;
+}
+// サーバー側 areSimilarTitles と同判定（link 一致は呼び出し側で判定）
+function areSimilarTitlesFront(a, b) {
+  const na = stripBracketsFront(normalizeTitleFront(a)).replace(/\s+/g, '');
+  const nb = stripBracketsFront(normalizeTitleFront(b)).replace(/\s+/g, '');
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const short = Math.min(na.length, nb.length);
+  if (short >= 8 && (na.includes(nb) || nb.includes(na))) return true;
+  const ta = contentTokensFront(a);
+  const tb = contentTokensFront(b);
+  if (ta.size < 4 || tb.size < 4) return false;
+  let inter = 0;
+  for (const t of ta) if (tb.has(t)) inter++;
+  if (inter < 2) return false;
+  const union = ta.size + tb.size - inter;
+  const j = union === 0 ? 0 : inter / union;
+  const cont = inter / Math.min(ta.size, tb.size);
+  if (j >= 0.3) return true;
+  if (j >= 0.12 && cont >= 0.24 && inter >= 3) return true;
+  return false;
+}
+function isDuplicateOfExisting(p, existing) {
+  if (!p || !p.title) return true;
+  for (const e of existing) {
+    if (!e || !e.title) continue;
+    if (p.link && e.link && p.link === e.link) return true;
+    try {
+      if (areSimilarTitlesFront(p.title, e.title)) return true;
+    } catch (err) { /* 判定失敗時は重複にしない */ }
+  }
+  return false;
+}
 function itemKey(p) {
   if (!p) return '';
   if (p.id) return 'id:' + p.id;
@@ -772,7 +845,16 @@ function mergeFreshPlaylist(fresh) {
     return fresh.length;
   }
   const seen = new Set(playlist.map(itemKey));
-  const newcomers = fresh.filter((p) => p && p.title && !seen.has(itemKey(p)));
+  // 完全一致キーに加え、既読との類似タイトルも除外する（後追いの類似再掲を防ぐ）。
+  // 既読・未読の両方と比較し、候補同士の類似も1件にまとめる。
+  const picked = [];
+  const newcomers = [];
+  for (const p of fresh) {
+    if (!p || !p.title || seen.has(itemKey(p))) continue;
+    if (isDuplicateOfExisting(p, playlist) || isDuplicateOfExisting(p, picked)) continue;
+    picked.push(p);
+    newcomers.push(p);
+  }
   if (newcomers.length === 0) return 0;
   const insertAt = Math.min(playlist.length, Math.max(0, idx + 1 + MERGE_AHEAD));
   playlist.splice(insertAt, 0, ...newcomers);

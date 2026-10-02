@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1048,12 +1048,40 @@ function memberKey(m, fallbackPref) {
 
 /**
  * related 配列を作る: 同グループの self 以外のメンバーを
- * [{ title, link, source, pubDate }] 形で返す。単独グループは []。
+ * [{ prefecture, title, link, source, pubDate }] 形で返す。単独グループは []。
+ * （prefecture は表示用。旧クライアントは無視する）
  */
 function relatedOf(members, selfKey) {
   return (members || [])
     .filter((m) => memberKey(m) !== selfKey)
-    .map((m) => ({ title: m.title, link: m.link, source: m.source, pubDate: m.pubDate || null }));
+    .map((m) => ({
+      prefecture: m.prefecture || '',
+      title: m.title,
+      link: m.link,
+      source: m.source,
+      pubDate: m.pubDate || null,
+    }));
+}
+
+/**
+ * 同一 groupId は最初の1件だけ残す（順序保持）。
+ * 類似ニュースの重複再生を防ぐための分散配置後の仕上げ用。
+ * 残った代表の groupSize / related は呼び出し側で付け直す。
+ */
+function dedupeByGroup(items) {
+  const seen = new Set();
+  const out = [];
+  for (const it of items || []) {
+    const gid = it && it.groupId != null ? it.groupId : null;
+    if (gid == null) {
+      out.push(it);
+      continue;
+    }
+    if (seen.has(gid)) continue;
+    seen.add(gid);
+    out.push(it);
+  }
+  return out;
 }
 
 /** §4.2.2 固定契約の prefectures 配列を構築（北→南順・非空県のみ）+ 拡張キー付き */
@@ -1102,27 +1130,33 @@ function buildPrefectures() {
 
 /**
  * サイネージ再生用の全体プレイリストを構築する。
- * - 類似グループを割り当てた上で、同一 groupId が連続しないよう分散配置する。
+ * - 全体で類似グループを割り当てた上で、同一 groupId が連続しないよう分散配置する。
+ * - 同一グループは最初の1件だけ残し、残りは related に格納する（重複再生しない）。
+ *   県を跨いだ類似記事（青森→数件後に岩手など）もここで1件にまとまる。
  * - 「全国」バケットは末尾に回す（ローカル優先）。話題バケット（国際/IT/科学）はさらに後ろ。
  */
 function buildPlaylist() {
   const flat = flatItems();
-  const isLocal = (e) => PREFECTURES.includes(e.prefecture);
-  const local = flat.filter(isLocal);
-  const national = flat.filter((e) => e.prefecture === '全国');
-  const topical = flat.filter((e) => TOPIC_CATEGORIES.includes(e.prefecture));
-  const { items: grouped } = assignGroups(local);
-  const ordered = interleaveAvoidSameGroup(grouped);
-  const { items: groupedNat } = assignGroups(national);
-  const { items: groupedTop } = assignGroups(topical);
-  const all = [...ordered, ...interleaveAvoidSameGroup(groupedNat), ...interleaveAvoidSameGroup(groupedTop)];
-  // playlist 要素にも id / bodyExcerpt / related を付与（追加のみ。既存キーは不変）
+  // 全体でグループ化する（県・バケットを跨いだ類似も同一 groupId になる）
+  const { items: grouped } = assignGroups(flat);
   const membersByGroup = new Map();
-  for (const it of all) {
-    if (!membersByGroup.has(it.groupId)) membersByGroup.set(it.groupId, []);
-    membersByGroup.get(it.groupId).push(it);
+  for (const g of grouped) {
+    if (!membersByGroup.has(g.groupId)) membersByGroup.set(g.groupId, []);
+    membersByGroup.get(g.groupId).push(g);
   }
-  return all.map((it) => {
+  const isLocal = (e) => PREFECTURES.includes(e.prefecture);
+  const local = grouped.filter(isLocal);
+  const national = grouped.filter((e) => e.prefecture === '全国');
+  const topical = grouped.filter((e) => TOPIC_CATEGORIES.includes(e.prefecture));
+  const ordered = [
+    ...interleaveAvoidSameGroup(local),
+    ...interleaveAvoidSameGroup(national),
+    ...interleaveAvoidSameGroup(topical),
+  ];
+  // 同一グループの2件目以降は再生しない（最初の表示だけにする）
+  const deduped = dedupeByGroup(ordered);
+  // playlist 要素にも id / bodyExcerpt / related を付与（追加のみ。既存キーは不変）
+  return deduped.map((it) => {
     const summary = it.summary || summarizeText(it.body || '');
     return {
       ...it,
@@ -1637,6 +1671,7 @@ module.exports = {
   buildPrefectures,
   buildPlaylist,
   buildGroups,
+  dedupeByGroup,
   totalNewsCount,
   assignGroups,
   interleaveAvoidSameGroup,
