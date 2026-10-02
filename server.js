@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -222,6 +222,9 @@ const TOPIC_FEEDS = {
   'https://news.yahoo.co.jp/rss/topics/world.xml': '国際',
   'https://news.yahoo.co.jp/rss/topics/it.xml': 'IT',
   'https://news.yahoo.co.jp/rss/topics/science.xml': '科学',
+  'https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml': 'IT',
+  'https://feeds.cnn.co.jp/rss/cnn/cnn.rdf': '海外',
+  'http://feeds.afpbb.com/rss/afpbb/afpbbnews': '海外',
 };
 // 話題バケット名の一覧（北→南のような固定順序。playlist では「全国」の後に配置）
 const TOPIC_CATEGORIES = [...new Set(Object.values(TOPIC_FEEDS))];
@@ -1143,7 +1146,7 @@ function buildPrefectures() {
  * - 全体で類似グループを割り当てた上で、同一 groupId が連続しないよう分散配置する。
  * - 同一グループは最初の1件だけ残し、残りは related に格納する（重複再生しない）。
  *   県を跨いだ類似記事（青森→数件後に岩手など）もここで1件にまとまる。
- * - 「全国」バケットは末尾に回す（ローカル優先）。話題バケット（国際/IT/科学）はさらに後ろ。
+ * - 「全国」バケットは末尾に回す（ローカル優先）。話題バケット（国際/IT/科学/海外）はさらに後ろ。
  */
 function buildPlaylist() {
   const flat = flatItems();
