@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '0.7.0';
+const VERSION = '0.8.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -49,6 +49,7 @@ const DEFAULT_SETTINGS = {
   maxAgeHours: 24, // この時間以内のニュースのみ表示
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
+  theme: 'dark', // 画面テーマ（'dark' / 'light'）
 };
 
 function getDefaultSettings() {
@@ -102,6 +103,10 @@ function normalizeSettings(input, base) {
   }
   if (src.ttsRate !== undefined) {
     s.ttsRate = snapRate(src.ttsRate);
+  }
+  if (src.theme !== undefined) {
+    const t = String(src.theme).toLowerCase();
+    s.theme = t === 'light' ? 'light' : t === 'dark' ? 'dark' : b.theme;
   }
   return s;
 }

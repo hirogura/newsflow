@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>ローカルニュース サイネージ</title>
+<title>News Flow</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -185,12 +186,42 @@
   #ctrlRow button:hover { background: #333; color: #fff; }
   #ver { font-size: 1.8vmin; color: #666; margin-top: 1vmin; }
   #ctrlMsg { font-size: 2vmin; color: #9fc3ff; min-height: 1em; }
+  /* ライトモード（既定はダーク。body.light で上書き） */
+  body.light { background: #f4f4f4; color: #222; }
+  body.light #header { color: #666; border-bottom-color: #ddd; }
+  body.light #header .hbtn { color: #1a56db; border-color: #bbb; }
+  body.light #header .hbtn:hover { background: #e8e8e8; }
+  body.light #verHead { color: #999 !important; }
+  body.light #voiceWarn { background: #fff3cd; color: #856404; }
+  body.light #title { color: #111; }
+  body.light #photo { background: #e0e0e0; }
+  body.light #body { color: #333; }
+  body.light #body.empty { color: #999; }
+  body.light #related { color: #1a56db; }
+  body.light #related .rel-label { color: #4a7fc9; }
+  body.light #meta { color: #666; }
+  body.light #counter { color: #999; }
+  body.light #hint { color: #999; }
+  body.light #right { border-left-color: #ddd; }
+  body.light #listHeader { color: #666; border-bottom-color: #ddd; }
+  body.light .item:hover { background: #e8e8e8; }
+  body.light .item.active { background: #dbe7ff; border-color: #2f6fd0; }
+  body.light .item .is { color: #888; }
+  body.light #startOverlay { background: rgba(255,255,255,0.97); }
+  body.light #startOverlay h1 { color: #111; }
+  body.light #startOverlay p { color: #555; }
+  body.light #err { color: #c00; }
+  body.light #ctrlRow button { background: #fff; color: #333; border-color: #bbb; }
+  body.light #ctrlRow button:hover { background: #e8e8e8; color: #111; }
+  body.light #ver { color: #999; }
+  body.light #ctrlMsg { color: #1a56db; }
 </style>
 </head>
 <body>
+<script>try { if (localStorage.getItem('newsflow-theme') === 'light') document.body.classList.add('light'); } catch (e) {}</script>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
 <div id="header">
-  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.7.0</span></span>
+  <span>News Flow <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.8.0</span></span>
   <span><span id="clock"></span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
 </div>
 
@@ -212,7 +243,7 @@
 </div>
 
 <div id="startOverlay">
-  <h1>ローカルニュース サイネージ</h1>
+  <h1>News Flow</h1>
   <p>最新ローカルニュースを24時間連続で読み上げます。読ませたいRSSを登録し個人で使用してください。読み上げはブラウザの機能で行なっているのでブラウザによって品質は変わります</p>
   <button id="startBtn">ニュース再生を開始する</button>
   <div id="ctrlRow">
@@ -220,7 +251,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.0.7.0</div>
+  <div id="ver">v.0.8.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -377,7 +408,15 @@ async function loadSettings() {
     const s = (data && data.settings) || {};
     if (typeof s.ttsEnabled === 'boolean') ttsEnabled = s.ttsEnabled;
     if (Number.isFinite(Number(s.ttsRate))) ttsRate = Number(s.ttsRate);
+    if (s.theme === 'light' || s.theme === 'dark') applyTheme(s.theme);
   } catch (e) { /* 既定値で継続 */ }
+}
+
+// 画面テーマの適用（サーバー設定が正・localStorage はちらつき防止のキャッシュ）
+function applyTheme(theme) {
+  const light = theme === 'light';
+  document.body.classList.toggle('light', light);
+  try { localStorage.setItem('newsflow-theme', light ? 'light' : 'dark'); } catch (e) {}
 }
 
 async function loadVersion() {

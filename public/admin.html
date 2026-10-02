@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>RSS管理 - newsflow</title>
+<title>RSS管理 - News Flow</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" />
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -48,9 +49,27 @@
   #msg { min-height: 1.5em; font-size: 14px; margin-bottom: 12px; }
   #msg.err { color: #f66; } #msg.ok { color: #7dd87d; }
   .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  /* ライトモード（既定はダーク。body.light で上書き） */
+  body.light { background: #f4f4f4; color: #222; }
+  body.light .sub { color: #777; }
+  body.light #status { background: #fff; border-color: #ddd; color: #555; }
+  body.light th, body.light td { border-bottom-color: #ddd; }
+  body.light th { color: #777; }
+  body.light td.url { color: #1a56db; }
+  body.light button { background: #fff; color: #222; border-color: #bbb; }
+  body.light button:hover { background: #e8e8e8; }
+  body.light button.danger { background: #f8d7da; border-color: #c66; color: #721c24; }
+  body.light button.danger:hover { background: #f1b0b7; }
+  body.light button.primary { background: #0a4d8c; border-color: #2f6fd0; color: #fff; }
+  body.light button.primary:hover { background: #0d61ad; }
+  body.light form.add { background: #fff; border-color: #ddd; }
+  body.light form.add label { color: #555; }
+  body.light form.add input, body.light form.add select { background: #fff; color: #222; border-color: #bbb; }
+  body.light #msg.err { color: #c00; } body.light #msg.ok { color: #1e7e34; }
 </style>
 </head>
 <body>
+<script>try { if (localStorage.getItem('newsflow-theme') === 'light') document.body.classList.add('light'); } catch (e) {}</script>
 <h1>RSSフィード管理</h1>
 <div class="sub"><a href="/">← サイネージに戻る</a></div>
 <div id="status">読み込み中…</div>
@@ -91,6 +110,12 @@
       <option value="1.2">3: ふつう (1.2)</option>
       <option value="1.4">4: やや速い (1.4)</option>
       <option value="1.6">5: 速い (1.6)</option>
+    </select>
+  </label>
+  <label>画面テーマ
+    <select id="sTheme">
+      <option value="dark">ダークモード</option>
+      <option value="light">ライトモード</option>
     </select>
   </label>
   <div><button class="primary" type="submit">設定を保存する</button></div>
@@ -241,6 +266,12 @@ document.getElementById('refreshBtn').addEventListener('click', async () => {
   }
 });
 
+function applyTheme(theme) {
+  const light = theme === 'light';
+  document.body.classList.toggle('light', light);
+  try { localStorage.setItem('newsflow-theme', light ? 'light' : 'dark'); } catch (e) {}
+}
+
 async function loadSettings() {
   try {
     const res = await fetch('/api/settings', { cache: 'no-store' });
@@ -251,8 +282,17 @@ async function loadSettings() {
     if (s.maxAgeHours != null) document.getElementById('sMaxAge').value = s.maxAgeHours;
     document.getElementById('sTts').value = s.ttsEnabled === false ? 'off' : 'on';
     if (s.ttsRate != null) document.getElementById('sRate').value = String(s.ttsRate);
+    if (s.theme === 'light' || s.theme === 'dark') {
+      document.getElementById('sTheme').value = s.theme;
+      applyTheme(s.theme);
+    }
   } catch (e) { /* 無視 */ }
 }
+
+// テーマ切替は保存前にも即時プレビューする（保存でサーバーに保持）
+document.getElementById('sTheme').addEventListener('change', (e) => {
+  applyTheme(e.target.value);
+});
 
 document.getElementById('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -262,6 +302,7 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
     maxAgeHours: Number(document.getElementById('sMaxAge').value),
     ttsEnabled: document.getElementById('sTts').value === 'on',
     ttsRate: Number(document.getElementById('sRate').value),
+    theme: document.getElementById('sTheme').value,
   };
   try {
     const res = await fetch('/api/settings', {
@@ -271,9 +312,11 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
     });
     const data = await res.json();
     if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    applyTheme(data.settings.theme);
     showMsg('設定を保存しました（取得間隔 ' + data.settings.fetchIntervalMinutes + '分 / ' +
       data.settings.maxAgeHours + '時間以内を表示 / 読み上げ' +
-      (data.settings.ttsEnabled ? 'On' : 'Off') + ' / 速度' + data.settings.ttsRate + '）。', 'ok');
+      (data.settings.ttsEnabled ? 'On' : 'Off') + ' / 速度' + data.settings.ttsRate +
+      ' / ' + (data.settings.theme === 'light' ? 'ライトモード' : 'ダークモード') + '）。', 'ok');
   } catch (e2) {
     showMsg('設定の保存に失敗しました: ' + e2.message, 'err');
   }
