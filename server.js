@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.6.0';
+const VERSION = '1.7.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -287,6 +287,31 @@ function freshFeedState(f) {
 }
 
 let feedStates = FEEDS.map(freshFeedState);
+
+/** source 名（フィード名）からフィード ID を逆引きする（旧データの移行用。無ければ null） */
+function feedIdByName(name) {
+  if (!name) return null;
+  const hit = FEEDS.find((f) => f.name === name);
+  return hit ? feedId(hit.url) : null;
+}
+
+/** 表示対象（チェック入り）のフィード ID 集合 */
+function enabledFeedIds() {
+  return new Set(
+    FEEDS.filter((f) => f.enabled !== false).map((f) => feedId(f.url))
+  );
+}
+
+/**
+ * 記事が表示対象か。feedId 不明の旧データは表示する（fail-open）。
+ * チェックを外したフィードの記事は store に残るが表示だけ除外される
+ *（再チェックで即復活する。削除とは異なり store クリアはしない）。
+ */
+function isFeedEnabledFor(entry, enabledIds) {
+  if (!entry || !entry.feedId) return true;
+  const set = enabledIds || enabledFeedIds();
+  return set.has(entry.feedId);
+}
 
 let lastUpdatedAt = null;
 let lastFetchResult = { ok: 0, ng: 0, items: 0, errors: [] };
@@ -801,6 +826,8 @@ function loadStore() {
               title: e.title,
               link: e.link,
               source: e.source,
+              // v1.7.0 以降は feedId を保持する。旧データは source 名から逆引きする
+              feedId: e.feedId || feedIdByName(e.source),
               pubDate: e.pubDate || null,
               fetchedAt: e.fetchedAt,
               body: e.body || '',
@@ -934,6 +961,7 @@ function ingestFeedItems(feed, items, fetchedAt) {
         title: n.title,
         link: n.link,
         source: n.source,
+        feedId: feedId(feed.url),
         pubDate: n.pubDate,
         fetchedAt,
         body: '',
@@ -1034,10 +1062,12 @@ async function fetchAllFeeds() {
 function flatItems() {
   const out = [];
   const nowMs = Date.now();
+  const enabledIds = enabledFeedIds();
   for (const pref of [...PREFECTURES, '全国', ...TOPIC_CATEGORIES]) {
     const list = store.get(pref) || [];
     for (const e of list) {
       if (!isWithinHours(e, settings.maxAgeHours, nowMs)) continue;
+      if (!isFeedEnabledFor(e, enabledIds)) continue;
       out.push({
         prefecture: e.prefecture || pref,
         title: e.title,
@@ -1109,8 +1139,11 @@ function buildPrefectures() {
   }
   const out = [];
   const nowMs = Date.now();
+  const enabledIds = enabledFeedIds();
   for (const pref of PREFECTURES) {
-    const list = (store.get(pref) || []).filter((e) => isWithinHours(e, settings.maxAgeHours, nowMs));
+    const list = (store.get(pref) || []).filter(
+      (e) => isWithinHours(e, settings.maxAgeHours, nowMs) && isFeedEnabledFor(e, enabledIds)
+    );
     if (list.length === 0) continue;
     out.push({
       prefecture: pref,
@@ -1198,11 +1231,12 @@ function buildGroups() {
 
 function totalNewsCount() {
   const nowMs = Date.now();
+  const enabledIds = enabledFeedIds();
   let n = 0;
   for (const p of [...PREFECTURES, ...TOPIC_CATEGORIES]) {
     const list = store.get(p) || [];
     for (const e of list) {
-      if (isWithinHours(e, settings.maxAgeHours, nowMs)) n++;
+      if (isWithinHours(e, settings.maxAgeHours, nowMs) && isFeedEnabledFor(e, enabledIds)) n++;
     }
   }
   return n;
@@ -1714,6 +1748,47 @@ app.delete('/api/feeds/:index', (req, res) => {
   res.json({ ok: true, removed, feeds: feedStates });
 });
 
+// ---- フィード更新（管理画面の「対象」チェックボックス用） ----
+// { enabled?: boolean, name?: string } を受け付け、永続化する。
+// チェックを外しても記事は store に残る（表示だけ除外。再チェックで即復活）。
+// チェックを入れた場合は背景で再取得する（無効期間中の分を取り込む）。
+app.put('/api/feeds/:id', (req, res) => {
+  const idx = resolveFeedIndex(String(req.params.id || ''));
+  if (!Number.isInteger(idx) || idx < 0 || idx >= FEEDS.length) {
+    return res.status(404).json({ ok: false, error: '指定のフィードが見つかりません' });
+  }
+  const body = (req.body && typeof req.body === 'object' ? req.body : {});
+  const feed = FEEDS[idx];
+  const prev = feedStates[idx] || freshFeedState(feed);
+  if (body.enabled !== undefined) {
+    const v = body.enabled;
+    feed.enabled = !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off');
+  }
+  if (body.name !== undefined) {
+    const name = String(body.name).trim().slice(0, 100);
+    if (!name) {
+      return res.status(400).json({ ok: false, error: 'name を空にはできません' });
+    }
+    feed.name = name;
+  }
+  saveFeeds();
+  const next = {
+    id: feedId(feed.url),
+    name: feed.name,
+    url: feed.url,
+    enabled: feed.enabled !== false,
+    ok: !!prev.ok,
+    items: prev.items || 0,
+    error: prev.error || null,
+  };
+  feedStates[idx] = next;
+  // 有効化時は背景で即時取得（応答は待たない）
+  if (next.enabled) {
+    fetchAllFeeds().catch((e) => console.error('fetch after enable failed:', e));
+  }
+  res.json({ ok: true, feed: next, feeds: feedStates });
+});
+
 // ---- 記事本文オンデマンド API（フロントのフォールバック用） ----
 app.get('/api/article', async (req, res) => {
   const url = (req.query.url || '').toString();
@@ -1887,6 +1962,9 @@ module.exports = {
   resolveFeedIndex,
   feedId,
   articleId,
+  feedIdByName,
+  enabledFeedIds,
+  isFeedEnabledFor,
   loadFeeds,
   saveFeeds,
   describeWeather,

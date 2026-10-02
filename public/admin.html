@@ -77,8 +77,8 @@
 
 <h2 style="font-size:16px;margin-bottom:10px;">登録中のフィード</h2>
 <table>
-  <thead><tr><th>#</th><th>名前</th><th>URL</th><th>状態</th><th>操作</th></tr></thead>
-  <tbody id="feedRows"><tr><td colspan="5">読み込み中…</td></tr></tbody>
+  <thead><tr><th>#</th><th>名前</th><th>URL</th><th>状態</th><th>対象</th><th>操作</th></tr></thead>
+  <tbody id="feedRows"><tr><td colspan="6">読み込み中…</td></tr></tbody>
 </table>
 
 <h2 style="font-size:16px;margin-bottom:10px;">フィードを追加</h2>
@@ -242,6 +242,16 @@ async function loadAll() {
     const tr = document.createElement('tr');
     tr.innerHTML = '<td>' + (f.id ? esc(String(f.id).slice(0, 8)) : i) + '</td><td>' + esc(f.name) + '</td>' +
       '<td class="url">' + esc(f.url) + '</td><td>' + stHtml + '</td>';
+    // 対象チェックボックス（デフォルトOn。外したフィードの記事は表示対象外になる）
+    const targetTd = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = !st || st.enabled !== false;
+    cb.title = 'チェックが入っているフィードの記事が表示対象になります';
+    cb.setAttribute('aria-label', '「' + f.name + '」を表示対象にする');
+    cb.addEventListener('change', () => setFeedEnabled(f.id != null ? f.id : i, f.name, cb.checked, cb));
+    targetTd.appendChild(cb);
+    tr.appendChild(targetTd);
     const td = document.createElement('td');
     const refBtn = document.createElement('button');
     refBtn.textContent = '再取得';
@@ -271,6 +281,27 @@ async function refreshFeed(idOrIndex, name, btn) {
     showMsg('再取得に失敗しました: ' + e.message, 'err');
   } finally {
     if (btn) btn.disabled = false;
+  }
+}
+
+async function setFeedEnabled(idOrIndex, name, enabled, checkbox) {
+  showMsg('');
+  if (checkbox) checkbox.disabled = true;
+  try {
+    const res = await fetch('/api/feeds/' + encodeURIComponent(idOrIndex), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    showMsg('「' + name + '」を' + (enabled ? '表示対象にしました' : '表示対象から外しました') + '。', 'ok');
+    await loadAll();
+  } catch (e) {
+    showMsg('対象の変更に失敗しました: ' + e.message, 'err');
+    if (checkbox) checkbox.checked = !enabled;
+  } finally {
+    if (checkbox) checkbox.disabled = false;
   }
 }
 
@@ -445,7 +476,7 @@ document.getElementById('importForm').addEventListener('submit', async (e) => {
 
 loadSettings();
 loadAll().catch((e) => {
-  elRows.innerHTML = '<tr><td colspan="5">読み込みに失敗しました: ' + esc(e.message) + '</td></tr>';
+  elRows.innerHTML = '<tr><td colspan="6">読み込みに失敗しました: ' + esc(e.message) + '</td></tr>';
 });
 </script>
 </body>
