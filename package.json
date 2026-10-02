@@ -1,6 +1,6 @@
 {
   "name": "newsflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (MVP)",
   "main": "server.js",
@@ -8,7 +8,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "postinstall": "node -e \"try{require('fs').mkdirSync('data',{recursive:true});console.log('[postinstall] data/ ready')}catch(e){console.error(e.message)}\"",
-    "test": "node test/grouping.test.js && node test/settings.test.js"
+    "test": "if [ -d test ]; then node test/grouping.test.js && node test/settings.test.js; else echo 'test/ is local-only (not distributed)'; fi"
   },
   "engines": {
     "node": ">=18"

@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -31,14 +31,9 @@ const BODY_READ_CHARS = parseInt(process.env.BODY_READ_CHARS || '220', 10) || 22
 const BROWSER_UA =
   'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 newsflow/1.1 (+local signage)';
 
-// 既定フィード（初回のみ使用。以降は data/feeds.json が正）
-const DEFAULT_FEEDS = [
-  { name: 'Yahoo!ニュース 主要', url: 'https://news.yahoo.co.jp/rss/topics/top-picks.xml', enabled: true },
-  { name: '47NEWS 地域 最新ニュース', url: 'https://assets.wor.jp/rss/rdf/ynlocalnews/news.rdf', enabled: true },
-  { name: 'Yahoo!ニュース 地域', url: 'https://news.yahoo.co.jp/rss/topics/local.xml', enabled: true },
-  { name: 'Yahoo!ニュース 国内', url: 'https://news.yahoo.co.jp/rss/topics/domestic.xml', enabled: true },
-  { name: '47NEWS 全国 最新ニュース', url: 'https://assets.wor.jp/rss/rdf/ynnews/news.rdf', enabled: true },
-];
+// 既定フィード（空 = 初期状態は未登録。利用者が管理画面/APIで追加する。
+// data/feeds.json が存在すればそちらが正。登録フィードをリポジトリに同梱しない）
+const DEFAULT_FEEDS = [];
 
 // 可変フィード一覧（参照を維持したまま loadFeeds() で中身を置換する）
 const FEEDS = DEFAULT_FEEDS.map((f) => ({ ...f }));
