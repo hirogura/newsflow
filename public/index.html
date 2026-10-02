@@ -182,7 +182,7 @@
 <body>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
 <div id="header">
-  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.5.0</span></span>
+  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.6.0</span></span>
   <span><span id="clock"></span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
 </div>
 
@@ -211,7 +211,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.0.5.0</div>
+  <div id="ver">v.0.6.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -462,9 +462,10 @@ function showCurrent() {
 
 function speakText() {
   const cur = playlist[idx];
-  // 読み上げ文: 都道府県 + タイトル + 本文要約（3行程度・サーバー側で要約済み）
+  // 読み上げ文: タイトル + 本文要約（3行程度・サーバー側で要約済み）。
+  // 都道府県（「北海道」「全国」など）は画面表示のみで読み上げない。
   const extra = cur.summary || cur.body;
-  return cur.prefecture + '。' + cur.title + (extra ? '。' + extra : '');
+  return cur.title + (extra ? '。' + extra : '');
 }
 
 function speak(text, onend) {
