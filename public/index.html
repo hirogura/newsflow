@@ -21,6 +21,16 @@
   }
   #header a { color: #8ab4ff; text-decoration: none; font-size: 2vmin; }
   #header a:hover { text-decoration: underline; }
+  #header .hbtn {
+    background: transparent; color: #8ab4ff;
+    border: 1px solid #333; border-radius: 0.8vmin;
+    font-size: 2vmin; line-height: 1;
+    padding: 0.3vmin 1.2vmin; margin-left: 1vmin;
+    cursor: pointer;
+  }
+  #header .hbtn:hover { background: #1a1a1a; }
+  #header .hbtn:disabled { opacity: 0.35; cursor: default; }
+  #header .hbtn.paused-active { background: #5a1818; color: #fff; border-color: #a33; }
   #voiceWarn {
     display: none;
     width: 100%;
@@ -172,8 +182,8 @@
 <body>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
 <div id="header">
-  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.4.0</span></span>
-  <span><span id="clock"></span>　<a href="/admin.html">RSS管理</a></span>
+  <span>ローカルニュース 24時間サイネージ <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.5.0</span></span>
+  <span><span id="clock"></span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
 </div>
 
 <div id="main">
@@ -184,7 +194,7 @@
     <div id="related"></div>
     <div id="meta"></div>
     <div id="counter"></div>
-    <div id="hint">→キー: 次の記事 / ←キー: 前の記事 / 右の一覧クリックでも移動できます</div>
+    <div id="hint">→キー: 次の記事 / ←キー: 前の記事 / 右の一覧クリックでも移動できます / スペース: 一時停止・再開</div>
   </div>
   <div id="right">
     <div id="listHeader">タイトル一覧（<span id="listCount">0</span>件）</div>
@@ -201,7 +211,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.0.4.0</div>
+  <div id="ver">v.0.5.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -211,7 +221,7 @@
 // /api/news の playlist（類似分散済み・本文/要約付き）をその順序のまま再生する。
 // playlist が無い旧応答の場合は prefectures[] の展開にフォールバックする。
 
-let playlist = [];   // [{prefecture,title,link,source,pubDate,body,summary,groupId,groupSize}]
+let playlist = [];   // [{prefecture,title,link,source,pubDate,body,summary,groupId,groupSize,id}]
 let idx = 0;
 let started = false;
 let speaking = false; // 現在発話中か（キー操作の多重進行防止用ではない。単なる状態）
@@ -220,6 +230,17 @@ let wakeLock = null;
 // 読み上げ設定（/api/settings から取得。管理画面で変更可）
 let ttsEnabled = true;
 let ttsRate = 1.2;
+// 一時停止・発話世代管理・バックグラウンド更新
+// - playSeq: speak() ごとに加算する世代番号。Chrome は speechSynthesis.cancel() 時に
+//   古い発話の onend/onerror を非同期発火させるため、世代が一致しない終了通知は無視する
+//   （Firefox は発火しないため問題が出ないが、両対応のためガードする）。
+let paused = false;
+let playSeq = 0;
+let pendingTimer = null;
+let lastRefreshAt = 0;
+let refreshTimer = null;
+const REFRESH_INTERVAL_MS = 60 * 1000;
+const MERGE_AHEAD = 3;
 
 const elPref = document.getElementById('pref');
 const elGroup = document.getElementById('groupBadge');
@@ -289,6 +310,7 @@ function normalizePlaylist(data) {
       summary: p.summary || '',
       groupId: p.groupId || null,
       groupSize: p.groupSize || 1,
+      id: p.id || null,
     }));
   }
   // 旧応答フォールバック: prefectures[] を順に展開
@@ -302,6 +324,7 @@ function normalizePlaylist(data) {
         title: item.title, link: item.link || '', source: item.source || '',
         pubDate: item.pubDate || '', body: item.body || '', summary: item.summary || '',
         groupId: item.groupId || null, groupSize: item.groupSize || 1,
+        id: item.id || null,
       });
     }
   }
@@ -386,10 +409,11 @@ function highlightCurrent() {
   for (let i = 0; i < children.length; i++) {
     children[i].classList.toggle('active', i === idx);
   }
-  // 読み上げ中の項目が常に中央に来るよう自動スクロール
+  // 読み上げ中の項目が見える位置に維持する。Chrome では behavior:'smooth' の
+  // 連続呼び出しがスクロールを暴走させるため 'auto' + 'nearest' にする。
   const active = children[idx];
   if (active && typeof active.scrollIntoView === 'function') {
-    active.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
   }
 }
 
@@ -445,15 +469,19 @@ function speakText() {
 
 function speak(text, onend) {
   showCurrent();
+  if (paused) { speaking = false; return; }
   // 読み上げ Off の場合は発話せず一定時間表示して次へ
   if (!ttsEnabled) {
-    setTimeout(onend, 4000);
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 4000);
     return;
   }
   if (!('speechSynthesis' in window)) {
-    setTimeout(onend, 8000);
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 8000);
     return;
   }
+  const mySeq = ++playSeq;
   try { speechSynthesis.cancel(); } catch (e) {}
   const u = new SpeechSynthesisUtterance(text);
   u.lang = 'ja-JP';
@@ -463,7 +491,14 @@ function speak(text, onend) {
   const resumeTimer = setInterval(() => {
     try { if (speechSynthesis.speaking) speechSynthesis.resume(); } catch (e) {}
   }, 10000);
-  const wrappedEnd = () => { clearInterval(resumeTimer); onend(); };
+  const wrappedEnd = () => {
+    clearInterval(resumeTimer);
+    // Chrome では cancel() による古い発話の終了通知が遅れて届く。
+    // 世代が変わっていたら二重進行になるため無視する。
+    if (mySeq !== playSeq) return;
+    if (paused) { speaking = false; return; }
+    onend();
+  };
   u.onend = wrappedEnd;
   u.onerror = wrappedEnd;
   try {
@@ -472,16 +507,44 @@ function speak(text, onend) {
 }
 
 function stopSpeech() {
+  // 古い発話の遅延 onend/onerror を無効化してから停止する（Chrome 対策）
+  playSeq++;
+  if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+}
+
+function updatePauseUI() {
+  const pb = document.getElementById('pauseBtn');
+  const rb = document.getElementById('playBtn');
+  if (pb) { pb.classList.toggle('paused-active', paused); pb.disabled = !started || paused; }
+  if (rb) { rb.disabled = !started || !paused; }
+}
+
+function pausePlayback() {
+  if (!started || paused) return;
+  paused = true;
+  stopSpeech();
+  showCurrent();
+  updatePauseUI();
+}
+
+function resumePlayback() {
+  if (!started || !paused) return;
+  paused = false;
+  updatePauseUI();
+  // 現在の記事の先頭から読み直す（Chrome/Firefox で挙動が同一になる方式）
+  playAt(idx);
 }
 
 async function playAt(i) {
   if (!started) return;
+  if (paused) { showCurrent(); return; }
   if (i < 0) i = 0;
   if (i >= playlist.length) {
     // 一周したら最新データを再取得してエンドレスループ
     try {
       const fresh = await loadNews();
+      lastRefreshAt = Date.now();
       if (fresh.length > 0) { playlist = fresh; buildList(); }
     } catch (e) { console.warn('reload failed:', e); }
     i = 0;
@@ -494,9 +557,11 @@ async function playAt(i) {
   idx = i;
   const cur = playlist[idx];
   backfillBody(cur); // 非同期で補完（表示・次周に反映）
+  maybeRefreshInBackground();
   speaking = true;
   speak(speakText(), () => {
     speaking = false;
+    if (paused || !started) return;
     playAt(idx + 1);
   });
 }
@@ -505,16 +570,84 @@ function jumpTo(i) {
   if (!started || playlist.length === 0) return;
   if (i < 0) i = 0;
   if (i >= playlist.length) i = playlist.length - 1;
+  // 一時停止中は表示だけ移動し、発話は再開時まで行わない
+  if (paused) {
+    idx = i;
+    showCurrent();
+    return;
+  }
   stopSpeech();
-  // speak() 内の onend が二重発火しないよう少し待ってから再生する
-  setTimeout(() => playAt(i), 60);
+  speaking = false;
+  // Chrome では cancel() 直後の speak() が欠落する場合があるため1フレーム以上空ける
+  setTimeout(() => { if (!paused) playAt(i); }, 120);
 }
 
-// 右キー=次 / 左キー=前
+// ---- 再生中の新規記事取り込み ----
+// /api/news を定期取得し、未読の記事だけを「数個先」に差し込む。
+// 現在の読み上げ位置 (idx) は動かさないため、聞いている途中で表示が飛ばない。
+function itemKey(p) {
+  if (!p) return '';
+  if (p.id) return 'id:' + p.id;
+  if (p.link) return 'link:' + p.link;
+  return 'title:' + (p.title || '');
+}
+
+function mergeFreshPlaylist(fresh) {
+  if (!Array.isArray(fresh) || fresh.length === 0) return 0;
+  if (playlist.length === 0) {
+    playlist = fresh.slice();
+    idx = 0;
+    buildList();
+    showCurrent();
+    return fresh.length;
+  }
+  const seen = new Set(playlist.map(itemKey));
+  const newcomers = fresh.filter((p) => p && p.title && !seen.has(itemKey(p)));
+  if (newcomers.length === 0) return 0;
+  const insertAt = Math.min(playlist.length, Math.max(0, idx + 1 + MERGE_AHEAD));
+  playlist.splice(insertAt, 0, ...newcomers);
+  buildList();
+  // 左ペインは触らず、件数表示だけ最新化する（読み上げ中のちらつき防止）
+  elCounter.textContent = '全体 ' + (idx + 1) + '/' + playlist.length;
+  return newcomers.length;
+}
+
+async function refreshInBackground() {
+  if (!started || paused) return;
+  try {
+    const fresh = await loadNews();
+    lastRefreshAt = Date.now();
+    mergeFreshPlaylist(fresh);
+  } catch (e) { console.warn('background refresh failed:', e); }
+}
+
+function maybeRefreshInBackground() {
+  if (!started || paused) return;
+  if (Date.now() - lastRefreshAt < REFRESH_INTERVAL_MS) return;
+  lastRefreshAt = Date.now(); // 多重取得防止に先に更新
+  loadNews().then((fresh) => {
+    lastRefreshAt = Date.now();
+    mergeFreshPlaylist(fresh);
+  }).catch((e) => { console.warn('background refresh failed:', e); });
+}
+
+function startRefreshTimer() {
+  if (refreshTimer) clearInterval(refreshTimer);
+  refreshTimer = setInterval(refreshInBackground, REFRESH_INTERVAL_MS);
+}
+
+// 右キー=次 / 左キー=前（リピート抑制）/ スペース=一時停止・再開
 document.addEventListener('keydown', (e) => {
   if (!started) return;
+  if (e.repeat) return;
   if (e.key === 'ArrowRight') { e.preventDefault(); jumpTo(idx + 1); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); jumpTo(idx - 1); }
+  else if (e.key === ' ' || e.code === 'Space') {
+    // ボタンにフォーカスがある場合の二重動作を避ける
+    if (document.activeElement && (document.activeElement.tagName === 'BUTTON' || document.activeElement.tagName === 'INPUT')) return;
+    e.preventDefault();
+    if (paused) resumePlayback(); else pausePlayback();
+  }
 });
 
 document.getElementById('startBtn').addEventListener('click', async () => {
@@ -537,8 +670,12 @@ document.getElementById('startBtn').addEventListener('click', async () => {
         if (retry.length > 0) {
           playlist = retry;
           started = true;
+          paused = false;
           elOverlay.style.display = 'none';
           acquireWakeLock();
+          lastRefreshAt = Date.now();
+          startRefreshTimer();
+          updatePauseUI();
           buildList();
           playAt(0);
         }
@@ -547,6 +684,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     return;
   }
   started = true;
+  paused = false;
   elOverlay.style.display = 'none';
   acquireWakeLock();
   try {
@@ -555,6 +693,10 @@ document.getElementById('startBtn').addEventListener('click', async () => {
     speechSynthesis.speak(u);
     speechSynthesis.cancel();
   } catch (e) {}
+  playSeq++;
+  lastRefreshAt = Date.now();
+  startRefreshTimer();
+  updatePauseUI();
   buildList();
   playAt(0);
   try {
@@ -598,6 +740,9 @@ document.getElementById('rebootBtn').addEventListener('click', async () => {
 });
 
 // 起動前のプレビュー表示
+updatePauseUI();
+document.getElementById('pauseBtn').addEventListener('click', pausePlayback);
+document.getElementById('playBtn').addEventListener('click', resumePlayback);
 loadSettings().then(loadVersion);
 loadNews().then((list) => {
   if (list.length > 0) {
