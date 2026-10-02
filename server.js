@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '0.9.0';
+const VERSION = '1.0.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -374,6 +374,25 @@ function extractFeedImage(raw) {
   return '';
 }
 
+/**
+ * 読み上げ用に【...】で囲まれた部分（媒体名など）を除去する。
+ * 表示用の原文（title/body）は保持し、TTS に渡す直前・要約生成時にのみ適用する。
+ */
+function stripSpeakBrackets(s) {
+  return (s || '').replace(/【[^】]*】/g, '');
+}
+
+/**
+ * 読み上げ文を組み立てる（タイトル + 本文要約）。【...】は読み上げない。
+ * 空白の連続は1つにたたみ、前後の空白を除去する。
+ */
+function buildSpeakText(title, extra) {
+  const t = stripSpeakBrackets(title).replace(/[ \t\u3000]+/g, ' ').trim();
+  const b = stripSpeakBrackets(extra || '').replace(/\s+/g, ' ').trim();
+  if (!t) return b;
+  return t + (b ? '。' + b : '');
+}
+
 // ---------- 要約（3行程度） ----------
 /**
  * 本文を3文程度に要約して読み上げ用テキストを作る。
@@ -381,7 +400,7 @@ function extractFeedImage(raw) {
  * - 全体は最大 220 文字で丸める（TTS が長くなりすぎないように）
  */
 function summarizeText(text, maxSentences = 3, maxChars = 220) {
-  const src = (text || '').replace(/\s+/g, ' ').trim();
+  const src = stripSpeakBrackets(text || '').replace(/\s+/g, ' ').trim();
   if (!src) return '';
   const parts = src.match(/[^。！？\n]+[。！？\n]?/g) || [src];
   const sents = parts.map((s) => s.trim()).filter(Boolean).slice(0, maxSentences);
@@ -393,9 +412,10 @@ function summarizeText(text, maxSentences = 3, maxChars = 220) {
 /**
  * 読み上げ用の 3 行相当テキスト（指示書 §3.2 の bodyExcerpt）。
  * summarizeText の別名（先頭3文・上限文字数で文末丸め）。現行 summary と同値。
+ * 【...】は読み上げないため除去する（表示用の body 原文は保持）。
  */
 function bodyExcerpt(body, max) {
-  return summarizeText(body, 3, max == null ? BODY_READ_CHARS : max);
+  return summarizeText(stripSpeakBrackets(body), 3, max == null ? BODY_READ_CHARS : max);
 }
 
 /**
@@ -1540,6 +1560,8 @@ module.exports = {
   interleaveAvoidSameGroup,
   summarizeText,
   bodyExcerpt,
+  stripSpeakBrackets,
+  buildSpeakText,
   titleSimilarity,
   areSimilarTitles,
   titleTokens,

@@ -221,7 +221,7 @@
 <script>try { if (localStorage.getItem('newsflow-theme') === 'light') document.body.classList.add('light'); } catch (e) {}</script>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
 <div id="header">
-  <span>News Flow <span id="verHead" style="font-size:1.8vmin;color:#666;">v.0.9.0</span></span>
+  <span>News Flow <span id="verHead" style="font-size:1.8vmin;color:#666;">v.1.0.0</span></span>
   <span><span id="clock"></span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
 </div>
 
@@ -251,7 +251,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.0.9.0</div>
+  <div id="ver">v.1.0.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -550,8 +550,22 @@ function speakText() {
   const cur = playlist[idx];
   // 読み上げ文: タイトル + 本文要約（3行程度・サーバー側で要約済み）。
   // 都道府県（「北海道」「全国」など）は画面表示のみで読み上げない。
+  // 【NHK】【読売新聞】などの【...】も読み上げない（表示は元のまま）。
   const extra = cur.summary || cur.body;
-  return cur.title + (extra ? '。' + extra : '');
+  return buildSpeakText(cur.title, extra);
+}
+
+// 【...】で囲まれた部分を読み上げ対象から除去する（表示用原文は保持）。
+function stripSpeakBrackets(s) {
+  return (s || '').replace(/【[^】]*】/g, '');
+}
+
+// 読み上げ文を組み立てる（タイトル + 本文）。【...】は除去する。
+function buildSpeakText(title, extra) {
+  const t = stripSpeakBrackets(title).replace(/[ \t ]+/g, ' ').trim();
+  const b = stripSpeakBrackets(extra || '').replace(/\s+/g, ' ').trim();
+  if (!t) return b;
+  return t + (b ? '。' + b : '');
 }
 
 function speak(text, onend) {
