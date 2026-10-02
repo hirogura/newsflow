@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1229,6 +1229,88 @@ app.get('/api/version', (req, res) => {
   res.json({ ok: true, version: VERSION, display: `v.${VERSION}` });
 });
 
+// ---- 天気予報 API（Open-Meteo・キー不要。東京の今日/明日/明後日を返す） ----
+const WEATHER_LAT = 35.6895;
+const WEATHER_LON = 139.6917;
+const WEATHER_AREA = '東京';
+const WEATHER_TTL_MS = 30 * 60 * 1000;
+let weatherCache = { at: 0, data: null };
+
+/** Open-Meteo の weathercode → 日本語天気 + アイコン */
+function describeWeather(code) {
+  const n = Number(code);
+  if (n === 0) return { text: '晴れ', icon: '☀' };
+  if (n === 1) return { text: '晴れ', icon: '🌤' };
+  if (n === 2) return { text: '曇り', icon: '⛅' };
+  if (n === 3) return { text: '曇り', icon: '☁' };
+  if (n === 45 || n === 48) return { text: '霧', icon: '🌫' };
+  if (n === 51 || n === 53 || n === 55) return { text: '小雨', icon: '☂' };
+  if (n === 56 || n === 57) return { text: '雨', icon: '☔' };
+  if (n === 61 || n === 80) return { text: '雨', icon: '☔' };
+  if (n === 63 || n === 81) return { text: '雨', icon: '☔' };
+  if (n === 65 || n === 82) return { text: '大雨', icon: '☔' };
+  if (n === 66 || n === 67) return { text: '雨', icon: '☔' };
+  if (n === 71 || n === 77 || n === 85) return { text: '雪', icon: '☃' };
+  if (n === 73 || n === 75 || n === 86) return { text: '大雪', icon: '☃' };
+  if (n === 95 || n === 96 || n === 99) return { text: '雷雨', icon: '⛈' };
+  return { text: '曇り', icon: '☁' };
+}
+
+app.get('/api/weather', async (req, res) => {
+  try {
+    if (weatherCache.data && Date.now() - weatherCache.at < WEATHER_TTL_MS) {
+      return res.json(weatherCache.data);
+    }
+    const url =
+      `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}` +
+      '&daily=weathercode,precipitation_probability_max,temperature_2m_max,temperature_2m_min' +
+      '&timezone=Asia%2FTokyo&forecast_days=3';
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 10000);
+    let apiJson = null;
+    try {
+      const r = await fetch(url, { signal: ctl.signal, headers: { 'User-Agent': BROWSER_UA } });
+      if (!r.ok) throw new Error('weather HTTP ' + r.status);
+      apiJson = await r.json();
+    } finally {
+      clearTimeout(timer);
+    }
+    const daily = (apiJson && apiJson.daily) || {};
+    const dates = Array.isArray(daily.time) ? daily.time : [];
+    const codes = Array.isArray(daily.weathercode) ? daily.weathercode : [];
+    const pops = Array.isArray(daily.precipitation_probability_max)
+      ? daily.precipitation_probability_max
+      : [];
+    const tmax = Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max : [];
+    const tmin = Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min : [];
+    const labels = ['今日', '明日', '明後日'];
+    const days = [0, 1, 2].map((i) => {
+      const w = describeWeather(codes[i]);
+      return {
+        label: labels[i],
+        date: dates[i] || null,
+        code: codes[i] != null ? codes[i] : null,
+        weather: w.text,
+        icon: w.icon,
+        precip: pops[i] != null ? pops[i] : null,
+        tmax: tmax[i] != null ? tmax[i] : null,
+        tmin: tmin[i] != null ? tmin[i] : null,
+      };
+    });
+    const payload = {
+      ok: true,
+      area: WEATHER_AREA,
+      updatedAt: new Date().toISOString(),
+      days,
+    };
+    weatherCache = { at: Date.now(), data: payload };
+    res.json(payload);
+  } catch (e) {
+    if (weatherCache.data) return res.json(weatherCache.data);
+    res.status(502).json({ ok: false, error: '天気を取得できませんでした' });
+  }
+});
+
 // ---- 設定 API ----
 app.get('/api/settings', (req, res) => {
   res.json({ ok: true, settings, allowedRates: ALLOWED_RATES, version: VERSION });
@@ -1580,6 +1662,7 @@ module.exports = {
   articleId,
   loadFeeds,
   saveFeeds,
+  describeWeather,
   // 指示書 §3.4 の関数名との両対応エイリアス（実装名が正規。テストはどちらでも参照可）
   similarity: titleSimilarity,
   clusterItems: assignGroups,

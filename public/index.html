@@ -32,6 +32,24 @@
   #header .hbtn:hover { background: #1a1a1a; }
   #header .hbtn:disabled { opacity: 0.35; cursor: default; }
   #header .hbtn.paused-active { background: #5a1818; color: #fff; border-color: #a33; }
+  /* 左上: テレビニュース風の時計 + 3日天気（オーバーレイ表示） */
+  #headLeft { display: flex; align-items: center; gap: 2vmin; min-width: 0; }
+  #tvClock {
+    font-size: 3.2vmin; font-weight: 800; letter-spacing: 0.08em;
+    color: #fff; background: linear-gradient(180deg, #0b3d91, #061f4d);
+    border: 1px solid #4a7fc9; border-radius: 0.8vmin;
+    padding: 0.1vmin 1.6vmin; line-height: 1.3;
+    text-shadow: 0 0 0.6vmin rgba(0,0,0,0.8);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  #wxBox { display: flex; gap: 1.2vmin; font-size: 2.2vmin; color: #ddd; white-space: nowrap; }
+  #wxBox .wx-item {
+    background: #111; border: 1px solid #333; border-radius: 0.8vmin;
+    padding: 0.2vmin 1.2vmin; line-height: 1.6;
+  }
+  #wxBox .wx-label { color: #8ab4ff; font-weight: 700; margin-right: 0.6vmin; }
+  #wxBox .wx-pop { color: #9fc3ff; margin-left: 0.6vmin; }
   #voiceWarn {
     display: none;
     width: 100%;
@@ -191,7 +209,11 @@
   body.light #header { color: #666; border-bottom-color: #ddd; }
   body.light #header .hbtn { color: #1a56db; border-color: #bbb; }
   body.light #header .hbtn:hover { background: #e8e8e8; }
-  body.light #verHead { color: #999 !important; }
+  body.light #tvClock { background: linear-gradient(180deg, #0b3d91, #061f4d); color: #fff; border-color: #4a7fc9; }
+  body.light #wxBox { color: #333; }
+  body.light #wxBox .wx-item { background: #fff; border-color: #ccc; }
+  body.light #wxBox .wx-label { color: #1a56db; }
+  body.light #wxBox .wx-pop { color: #1a56db; }
   body.light #voiceWarn { background: #fff3cd; color: #856404; }
   body.light #title { color: #111; }
   body.light #photo { background: #e0e0e0; }
@@ -221,8 +243,11 @@
 <script>try { if (localStorage.getItem('newsflow-theme') === 'light') document.body.classList.add('light'); } catch (e) {}</script>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
 <div id="header">
-  <span>News Flow <span id="verHead" style="font-size:1.8vmin;color:#666;">v.1.0.0</span></span>
-  <span><span id="clock"></span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
+  <div id="headLeft">
+    <span id="tvClock">--:--</span>
+    <span id="wxBox"><span class="wx-item" id="wx0">取得中…</span><span class="wx-item" id="wx1" style="display:none;"></span><span class="wx-item" id="wx2" style="display:none;"></span></span>
+  </div>
+  <span><button id="pauseBtn" class="hbtn" type="button" title="一時停止">⏸</button><button id="playBtn" class="hbtn" type="button" title="再生">▶</button>　<a href="/admin.html">RSS管理</a>　<a href="/" id="titleLink">タイトル</a></span>
 </div>
 
 <div id="main">
@@ -251,7 +276,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.0.0</div>
+  <div id="ver">v.1.1.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -289,7 +314,8 @@ const elBody = document.getElementById('body');
 const elRelated = document.getElementById('related');
 const elMeta = document.getElementById('meta');
 const elCounter = document.getElementById('counter');
-const elClock = document.getElementById('clock');
+const elTvClock = document.getElementById('tvClock');
+const elWx = [document.getElementById('wx0'), document.getElementById('wx1'), document.getElementById('wx2')];
 const elOverlay = document.getElementById('startOverlay');
 const elErr = document.getElementById('err');
 const elVoiceWarn = document.getElementById('voiceWarn');
@@ -317,9 +343,54 @@ function hidePhoto() {
   elPhoto.style.display = 'none';
 }
 
-setInterval(() => {
-  elClock.textContent = new Date().toLocaleString('ja-JP');
-}, 1000);
+// 左上: テレビニュース風の時計（時：分・少し大きめのオーバーレイ表示）
+function updateTvClock() {
+  if (!elTvClock) return;
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  elTvClock.textContent = hh + ':' + mm;
+}
+updateTvClock();
+setInterval(updateTvClock, 5000);
+
+// 左上: 今日/明日/明後日の天気と降水確率（東京・/api/weather経由）
+async function fetchWeather() {
+  try {
+    const res = await fetch('/api/weather', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    const days = (data && data.days) || [];
+    days.slice(0, 3).forEach((day, i) => {
+      const box = elWx[i];
+      if (!box || !day) return;
+      box.style.display = '';
+      const pop = day.precip != null ? day.precip + '%' : '―%';
+      box.innerHTML = '';
+      const label = document.createElement('span');
+      label.className = 'wx-label';
+      label.textContent = day.label || '';
+      const main = document.createElement('span');
+      main.textContent = (day.icon ? day.icon + ' ' : '') + (day.weather || '―');
+      const popEl = document.createElement('span');
+      popEl.className = 'wx-pop';
+      popEl.textContent = ' ' + pop;
+      box.appendChild(label);
+      box.appendChild(main);
+      box.appendChild(popEl);
+      box.title = (data.area || '') + ' ' + (day.date || '') +
+        (day.tmax != null ? ' 最高' + Math.round(day.tmax) + '℃' : '') +
+        (day.tmin != null ? ' 最低' + Math.round(day.tmin) + '℃' : '');
+    });
+  } catch (e) {
+    if (elWx[0]) {
+      elWx[0].style.display = '';
+      elWx[0].textContent = '天気を取得できません';
+    }
+  }
+}
+fetchWeather();
+setInterval(fetchWeather, 30 * 60 * 1000);
 
 function pickVoice() {
   try {
@@ -427,9 +498,7 @@ async function loadVersion() {
     const disp = (data && data.display) || (data && data.version ? 'v.' + data.version : null);
     if (disp) {
       const a = document.getElementById('ver');
-      const b = document.getElementById('verHead');
       if (a) a.textContent = disp;
-      if (b) b.textContent = disp;
     }
   } catch (e) {}
 }
