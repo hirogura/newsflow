@@ -5,7 +5,7 @@
  * - 47都道府県のローカルニュースを RSS から15分ごとに定期収集・仕分け
  * - GET /api/news で仕分け済み最新ニュースを JSON 配信（§4.2.2 固定契約 + 拡張キー）
  * - public/ を静的配信（サイネージ画面 + RSS管理画面）
- * - PORT: 3364
+ * - PORT: 3364（127.0.0.1 で待受。外部公開は Tailscale Serve の HTTPS 経由）
  * - 拡張: 記事本文抽出(og:description優先) / 3行要約 / 類似グループ化・分散配置 /
  *         RSSフィード追加削除API (data/feeds.json 永続化)
  */
@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '0.8.0';
+const VERSION = '0.9.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1499,8 +1499,8 @@ async function main() {
   await fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
   scheduleFetch();
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[起動] http://0.0.0.0:${PORT} で待受中`);
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`[起動] http://127.0.0.1:${PORT} で待受中`);
   });
 }
 
