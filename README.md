@@ -1,4 +1,4 @@
-# newsflow — 47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (v.0.1.0)
+# newsflow — 47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (v.0.3.0)
 
 Ubuntu 26.04 LXD コンテナ内で RSS からローカルニュースを定期収集し、
 ブラウザの Web Speech API で日本語 TTS として24時間ノンストップで読み上げる
@@ -8,9 +8,7 @@ Ubuntu 26.04 LXD コンテナ内で RSS からローカルニュースを定期�
 - フロント: `public/index.html`（単一ファイル、黒背景・白文字・特大フォント）
 - API: `GET /api/news`（§4.2.2 固定契約）、`GET /api/health`
 
-Yahoo! RSS は個人利用限定です。再配信・公開はせず、個人のローカル閲覧に限定してください。
-
-## 1. Node.js の確認（本コンテナは導入済み。未導入環境向けの参考手順も併記）
+## 1. Node.js の確認
 
 ```bash
 node -v   # v22.23.3 を確認
@@ -19,11 +17,12 @@ npm -v    # 10.9.9 を確認
 sudo apt-get update && sudo apt-get install -y nodejs npm
 ```
 
-## 2. 依存導入
+## 2. インストール
 
 ```bash
+git clone https://github.com/hirogura/newsflow.git /opt/newsflow
 cd /opt/newsflow
-npm install
+npm install   # postinstall で data/ を自動作成（無ければ作成。登録フィードは .gitignore で除外）
 ```
 
 ## 3. 起動
@@ -83,7 +82,7 @@ curl -s http://127.0.0.1:3364/api/news | head -c 400
 ## 6. ブラウザで閲覧
 
 - `http://<host>:3364/` をブラウザで開きます。
-- トップ画面の版表示 `v.0.1.0` のほか、「ニュース再生を開始する」ボタンの下に
+- トップ画面の版表示 `v.0.3.0` のほか、「ニュース再生を開始する」ボタンの下に
   小さな「設定/RSSフィード管理」「アップデート」「再起動」ボタンを用意しています。
 
 開いたら「ニュース再生を開始する」ボタンをクリックしてください
@@ -125,9 +124,6 @@ sudo pacman -S speech-dispatcher espeak-ng
   （例: 姓としての「山口」「香川」「長野」「石川」「千葉」）。MVP では許容します。
 - ただし「東京都」→「京都府」の誤判定のみは必須で回避しています
   （京都府の判定に `/(?<!東)京都/` を使用）。
-- フィードは `https://news.yahoo.co.jp/rss/topics/*.xml` と
-  `https://assets.wor.jp/rss/rdf/yn*.rdf` を使用しています。
-  `www.47news.jp/rss/*` は 403 で取得不可のため使用しません。
 - 本文取得に失敗した記事はタイトルのみ読み上げます（サーバーは落とさず継続）。
   `og:description` / `meta[name=description]` が無いページでは `<p>` 抽出に
   フォールバックしますが、ナビ・メニュー等のノイズが混じる場合があります。
@@ -158,7 +154,7 @@ sudo pacman -S speech-dispatcher espeak-ng
   実行します（再起動時に自動再取得）。完了まで数十秒かかるため、画面の案内に従ってリロードしてください。
 - 「再起動」: `POST /api/restart` で systemd サービス `newsflow` を再起動します。
 - 制御系 API は環境変数 `DISABLE_CONTROL=1` で無効化できます（無効時は 403 を返します）。
-- バージョンは `GET /api/version`（`{ version, display: "v.0.1.0" }`）でも取得できます。
+- バージョンは `GET /api/version`（`{ version, display: "v.0.3.0" }`）でも取得できます。
 
 ## ライセンス
 
@@ -175,7 +171,7 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
 ## 本文取得
 
 - RSS には本文が無いため、記事ページを `fetch`（ブラウザ相当 UA・10秒タイムアウト・同時5件・ベストエフォート）して抽出しています。
-  優先度: `og:description`（Yahoo）→ `meta[name=description]`（47NEWS）→ JSON-LD `NewsArticle.description` → 長めの `<p>`。
+  優先度: `og:description`（Yahooなど）→ `meta[name=description]`（47NEWSなど）→ JSON-LD `NewsArticle.description` → 長めの `<p>`。
 - 取得した本文は `link` をキーにキャッシュし、読み上げ用に先頭3文・上限文字数で丸めた
   `summary` / `bodyExcerpt` を `/api/news` で配信します。本文が無い記事はタイトルのみ読み上げます。
 - 環境変数 `BODY_FETCH=0` で記事本文の取得を無効化できます。

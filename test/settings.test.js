@@ -21,8 +21,8 @@ function check(name, fn) {
   }
 }
 
-check('VERSION は 0.1.0', () => {
-  assert.strictEqual(m.VERSION, '0.1.0');
+check('VERSION は 0.3.0', () => {
+  assert.strictEqual(m.VERSION, '0.3.0');
 });
 
 check('getDefaultSettings: 既定値（15分/24時間/On/1.2）', () => {
