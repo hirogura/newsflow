@@ -344,7 +344,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.9.0</div>
+  <div id="ver">v.1.9.1</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -503,11 +503,17 @@ let eewHideTimer = null;
 function showEewBar(eew) {
   const bar = document.getElementById('eewBar');
   if (!bar || !eew) return;
+  // 訓練報は表示しない（元指示書 §6）
+  if (eew.isTraining) return;
+  // 取消報は表示中のバーを即座に消す（元指示書 §6 / §5-4-6）
+  if (eew.isCancel) {
+    if (eewHideTimer) { clearTimeout(eewHideTimer); eewHideTimer = null; }
+    bar.style.display = 'none';
+    return;
+  }
   const title = bar.querySelector('.eew-title');
   const detail = bar.querySelector('.eew-detail');
-  const label = eew.isCancel ? '【緊急地震速報（キャンセル）】'
-    : eew.isTraining ? '【緊急地震速報（訓練）】'
-    : '【緊急地震速報】';
+  const label = '【緊急地震速報】'; // 訓練/取消は上の分岐で除外済み
   if (title) title.textContent = label + ' ' + (eew.title || '');
   const parts = [];
   if (eew.hypocenter) parts.push('震源: ' + eew.hypocenter);

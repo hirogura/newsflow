@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.9.0';
+const VERSION = '1.9.1';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -213,6 +213,13 @@ let eewReconnectTimer = null;
 let eewPingTimer = null;
 let eewBackoffMs = EEW_RECONNECT_MIN_MS;
 const eewSseClients = new Set();
+
+const EEW_DISPLAY_MS = 60 * 1000; // 画面表示（自動で消すまでの時間）
+/** 直近の EEW が表示対象（受信から1分以内）かどうか */
+function eewActive() {
+  return !!(latestEew && latestEew.receivedAt &&
+    Date.now() - Date.parse(latestEew.receivedAt) < EEW_DISPLAY_MS);
+}
 
 /**
  * Wolfx の EEW 生 JSON を画面配信用に正規化する（純粋関数）。
@@ -1530,6 +1537,7 @@ app.get('/api/eew', (req, res) => {
     wsUrl: EEW_WS_URL,
     lastHeartbeatAt: eewLastHeartbeatAt,
     lastEewAt: eewLastEewAt,
+    active: eewActive(),
     eew: latestEew,
   });
 });
@@ -1537,13 +1545,14 @@ app.get('/api/eew', (req, res) => {
 // SSE で EEW を push 配信する（フロントは EventSource で購読）
 app.get('/api/eew/stream', (req, res) => {
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no', // Tailscale Serve 等のプロキシのバッファリング抑止
   });
   res.write(': connected\n\n');
-  // 接続時点の最新 EEW があれば即送る
-  if (latestEew) {
+  // 接続時点で「表示対象（1分以内）」の EEW があれば即送る
+  if (eewActive()) {
     res.write(`event: eew\ndata: ${JSON.stringify(latestEew)}\n\n`);
   }
   eewSseClients.add(res);
@@ -2283,7 +2292,9 @@ module.exports = {
   WEATHER_DEFAULT_AREA,
   // 緊急地震速報 (EEW / Wolfx)
   EEW_WS_URL,
+  EEW_DISPLAY_MS,
   eewEnabled,
+  eewActive,
   normalizeEew,
   handleEewMessage,
   broadcastEew,
