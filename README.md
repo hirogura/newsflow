@@ -4,7 +4,8 @@ Ubuntu 26.04 LXD コンテナ内で RSS からローカルニュースを定期�
 ブラウザの Web Speech API で日本語 TTS として24時間ノンストップで読み上げる
 フルスクリーン・サイネージの MVP です。
 
-- バックエンド: Node.js + Express、ポート **3364**、15分ごとに RSS 取得・都道府県仕分け
+- バックエンド: Node.js + Express、`127.0.0.1:3364` で待受、15分ごとに RSS 取得・都道府県仕分け
+  （外部公開は Tailscale Serve の HTTPS 経由）
 - フロント: `public/index.html`（単一ファイル、黒背景・白文字・特大フォント）
 - API: `GET /api/news`（§4.2.2 固定契約）、`GET /api/health`
 
@@ -81,7 +82,7 @@ curl -s http://127.0.0.1:3364/api/news | head -c 400
 
 ## 6. ブラウザで閲覧
 
-- `http://<host>:3364/` をブラウザで開きます。
+- `https://<tailnet-host>:3364/` をブラウザで開きます（Tailscale Serve 経由の HTTPS 公開。手順は下記参照）。
 - トップ画面の版表示 `v.0.9.0` のほか、「ニュース再生を開始する」ボタンの下に
   小さな「設定/RSSフィード管理」「アップデート」「再起動」ボタンを用意しています。
 
@@ -102,6 +103,27 @@ LXD でホスト側ポートへプロキシする場合（**ホストで実行**
 ```bash
 lxc config device add <container> newsflow proxy listen=tcp:0.0.0.0:3364 connect=tcp:127.0.0.1:3364
 ```
+
+## 7b. Tailscale Serve での公開（HTTPS）
+
+サーバーは `127.0.0.1:3364` のみで待受するため、Tailnet 内からの HTTPS アクセスは
+Tailscale Serve 経由で行います（`--bg` でバックグラウンド永続化）:
+
+```bash
+tailscale serve --bg --https=3364 http://127.0.0.1:3364
+```
+
+```bash
+# 確認（3364 が追加され、既存の他ポートが残っていること）
+tailscale serve status
+curl -sk https://<tailnet-host>:3364/api/health
+```
+
+注意事項:
+
+- 他ポートの公開には触れません。`tailscale serve reset` は実行しないでください
+  （全ポートの公開が消えます）。
+- 公開の停止は `tailscale serve --https=3364 off` です（3364 のみ停止。他ポートは維持）。
 
 ## 8. ブラウザ側 TTS の前提（音声が出ない場合の対処）
 
@@ -134,7 +156,8 @@ sudo pacman -S speech-dispatcher espeak-ng
 
 ## RSS 管理画面
 
-- `http://<host>:3364/admin.html` をブラウザで開きます（サイネージのヘッダー「RSS管理」リンクや
+- `http://<host>:3364/admin.html` をブラウザで開きます（Tailscale Serve 経由の場合は
+  `https://<tailnet-host>:3364/admin.html`。サイネージのヘッダー「RSS管理」リンクや
   トップの「設定/RSSフィード管理」ボタンからも移動可）。
 - 登録中のフィード一覧（取得状態 OK/失敗・件数・無効表示）、追加フォーム（名前・URL）、
   削除ボタン（確認後に削除）、各フィード行の「再取得」ボタン（`POST /api/feeds/:id/refresh` で個別再取得）、
@@ -210,3 +233,33 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
 | `BODY_READ_CHARS` | `220` | 読み上げ本文の最大文字数（3 行相当の目安） |
 | `SIMILARITY_THRESHOLD` | `0.5` | 類似判定しきい値の目安（現行は複合ルールで等価管理） |
 | `BODY_CACHE_MAX` | `2000` | 本文キャッシュ最大件数（現行は 1000 件で古いものから破棄） |
+
+## アンインストール
+
+```bash
+# 1. Tailscale Serve の公開を停止（3364 のみ。他ポートは維持）
+tailscale serve --https=3364 off
+tailscale serve status   # 3364 が消え、他ポートが残っていることを確認
+
+# 2. systemd サービスの停止・無効化・unit 削除
+sudo systemctl disable --now newsflow
+sudo rm /etc/systemd/system/newsflow.service
+sudo systemctl daemon-reload
+
+# 3. LXD プロキシを設定していた場合（ホストで実行）
+lxc config device remove <container> newsflow
+
+# 4. ufw で開放していた場合
+sudo ufw delete allow 3364/tcp
+
+# 5. 本体とログの削除
+sudo rm -rf /opt/newsflow
+sudo rm -f /var/log/newsflow.log
+```
+
+注意事項:
+
+- `tailscale serve reset` は使わないでください（他サービスの公開まで消えます）。
+- Tailscale 本体は他サービスが使っているため残します。
+- `data/feeds.json` 等の登録データは `.gitignore` 対象の個人データです。
+  残したい場合は削除前に `GET /api/feeds/export` でエクスポートしてください。
