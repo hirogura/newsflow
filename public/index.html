@@ -446,12 +446,20 @@ function highlightCurrent() {
   for (let i = 0; i < children.length; i++) {
     children[i].classList.toggle('active', i === idx);
   }
-  // 読み上げ中の項目が見える位置に維持する。Chrome では behavior:'smooth' の
-  // 連続呼び出しがスクロールを暴走させるため 'auto' + 'nearest' にする。
-  const active = children[idx];
-  if (active && typeof active.scrollIntoView === 'function') {
-    active.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-  }
+  scrollToCenter();
+}
+
+// 読み上げ中の行がリストの中央付近に来るようスクロールする。
+// scrollIntoView({behavior:'smooth'}) は Chrome で連続呼び出し時に暴走するため、
+// 矩形計算で一気に中央合わせする（smooth なし・Firefox/Chrome 同一挙動）。
+function scrollToCenter() {
+  const active = elList.children[idx];
+  if (!active || typeof active.getBoundingClientRect !== 'function') return;
+  if (typeof elList.getBoundingClientRect !== 'function') return;
+  const listRect = elList.getBoundingClientRect();
+  const r = active.getBoundingClientRect();
+  const delta = (r.top + r.height / 2) - (listRect.top + listRect.height / 2);
+  if (Math.abs(delta) > 1) elList.scrollTop += delta;
 }
 
 function renderBody(cur) {
