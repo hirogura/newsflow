@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -50,6 +50,7 @@ const DEFAULT_SETTINGS = {
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
   theme: 'dark', // 画面テーマ（'dark' / 'light'）
+  weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
 
 function getDefaultSettings() {
@@ -107,6 +108,15 @@ function normalizeSettings(input, base) {
   if (src.theme !== undefined) {
     const t = String(src.theme).toLowerCase();
     s.theme = t === 'light' ? 'light' : t === 'dark' ? 'dark' : b.theme;
+  }
+  if (src.weatherArea !== undefined) {
+    // 気象庁の予報区コードのみ受け付ける（未知値は維持/既定に寄せる）
+    const c = String(src.weatherArea).trim();
+    if (WEATHER_AREAS[c]) {
+      s.weatherArea = c;
+    } else if (!WEATHER_AREAS[b.weatherArea]) {
+      s.weatherArea = DEFAULT_SETTINGS.weatherArea;
+    }
   }
   return s;
 }
@@ -1263,14 +1273,74 @@ app.get('/api/version', (req, res) => {
   res.json({ ok: true, version: VERSION, display: `v.${VERSION}` });
 });
 
-// ---- 天気予報 API（Open-Meteo・キー不要。東京の今日/明日/明後日を返す） ----
-const WEATHER_LAT = 35.6895;
-const WEATHER_LON = 139.6917;
-const WEATHER_AREA = '東京';
-const WEATHER_TTL_MS = 30 * 60 * 1000;
-let weatherCache = { at: 0, data: null };
+// ---- 天気予報 API（気象庁API。設定の地域（都道府県→代表の一次細分区域）の今日/明日/明後日を返す） ----
+const WEATHER_DEFAULT_AREA = '130000'; // 東京
+// 予報区コード → { pref（都道府県）, area（一次細分区域コード）, areaName }。
+// area は県庁所在地側の代表区域（原則として先頭区域）。
+const WEATHER_AREAS = {
+  '016000': { pref: '北海道', area: '016010', areaName: '石狩地方' },
+  '020000': { pref: '青森県', area: '020010', areaName: '津軽' },
+  '030000': { pref: '岩手県', area: '030010', areaName: '内陸' },
+  '040000': { pref: '宮城県', area: '040010', areaName: '東部' },
+  '050000': { pref: '秋田県', area: '050010', areaName: '沿岸' },
+  '060000': { pref: '山形県', area: '060010', areaName: '村山' },
+  '070000': { pref: '福島県', area: '070010', areaName: '中通り' },
+  '080000': { pref: '茨城県', area: '080010', areaName: '北部' },
+  '090000': { pref: '栃木県', area: '090010', areaName: '南部' },
+  '100000': { pref: '群馬県', area: '100010', areaName: '南部' },
+  '110000': { pref: '埼玉県', area: '110010', areaName: '南部' },
+  '120000': { pref: '千葉県', area: '120010', areaName: '北西部' },
+  '130000': { pref: '東京都', area: '130010', areaName: '東京地方' },
+  '140000': { pref: '神奈川県', area: '140010', areaName: '東部' },
+  '150000': { pref: '新潟県', area: '150010', areaName: '下越' },
+  '160000': { pref: '富山県', area: '160010', areaName: '東部' },
+  '170000': { pref: '石川県', area: '170010', areaName: '加賀' },
+  '180000': { pref: '福井県', area: '180010', areaName: '嶺北' },
+  '190000': { pref: '山梨県', area: '190010', areaName: '中・西部' },
+  '200000': { pref: '長野県', area: '200010', areaName: '北部' },
+  '210000': { pref: '岐阜県', area: '210010', areaName: '美濃地方' },
+  '220000': { pref: '静岡県', area: '220010', areaName: '中部' },
+  '230000': { pref: '愛知県', area: '230010', areaName: '西部' },
+  '240000': { pref: '三重県', area: '240010', areaName: '北中部' },
+  '250000': { pref: '滋賀県', area: '250010', areaName: '南部' },
+  '260000': { pref: '京都府', area: '260010', areaName: '南部' },
+  '270000': { pref: '大阪府', area: '270000', areaName: '大阪府' },
+  '280000': { pref: '兵庫県', area: '280010', areaName: '南部' },
+  '290000': { pref: '奈良県', area: '290010', areaName: '北部' },
+  '300000': { pref: '和歌山県', area: '300010', areaName: '北部' },
+  '310000': { pref: '鳥取県', area: '310010', areaName: '東部' },
+  '320000': { pref: '島根県', area: '320010', areaName: '東部' },
+  '330000': { pref: '岡山県', area: '330010', areaName: '南部' },
+  '340000': { pref: '広島県', area: '340010', areaName: '南部' },
+  '350000': { pref: '山口県', area: '350010', areaName: '西部' },
+  '360000': { pref: '徳島県', area: '360010', areaName: '北部' },
+  '370000': { pref: '香川県', area: '370000', areaName: '香川県' },
+  '380000': { pref: '愛媛県', area: '380010', areaName: '中予' },
+  '390000': { pref: '高知県', area: '390010', areaName: '中部' },
+  '400000': { pref: '福岡県', area: '400010', areaName: '福岡地方' },
+  '410000': { pref: '佐賀県', area: '410010', areaName: '南部' },
+  '420000': { pref: '長崎県', area: '420010', areaName: '南部' },
+  '430000': { pref: '熊本県', area: '430010', areaName: '熊本地方' },
+  '440000': { pref: '大分県', area: '440010', areaName: '中部' },
+  '450000': { pref: '宮崎県', area: '450010', areaName: '南部平野部' },
+  '460100': { pref: '鹿児島県', area: '460010', areaName: '薩摩地方' },
+  '471000': { pref: '沖縄県', area: '471010', areaName: '本島中南部' },
+};
 
-/** Open-Meteo の weathercode → 日本語天気 + アイコン */
+/** 設定値の予報区コードを正規化する（未知は既定の東京） */
+function weatherAreaCode(code) {
+  const c = String(code == null ? '' : code).trim();
+  return WEATHER_AREAS[c] ? c : WEATHER_DEFAULT_AREA;
+}
+
+function weatherAreaInfo(code) {
+  return WEATHER_AREAS[weatherAreaCode(code)];
+}
+
+const WEATHER_TTL_MS = 30 * 60 * 1000;
+const weatherCache = new Map(); // officeCode -> { at, data }
+
+/** Open-Meteo の weathercode → 日本語天気 + アイコン（旧版互換のため残す。現行は気象庁APIを使用） */
 function describeWeather(code) {
   const n = Number(code);
   if (n === 0) return { text: '晴れ', icon: '☀' };
@@ -1290,15 +1360,150 @@ function describeWeather(code) {
   return { text: '曇り', icon: '☁' };
 }
 
-app.get('/api/weather', async (req, res) => {
-  try {
-    if (weatherCache.data && Date.now() - weatherCache.at < WEATHER_TTL_MS) {
-      return res.json(weatherCache.data);
+/** 気象庁の天気コード・概況文 → 短い表示文 + アイコン（本文は気象庁の概況をそのまま使う） */
+function describeJmaWeather(code, weathersText) {
+  const wt = String(weathersText == null ? '' : weathersText);
+  const c = String(code == null ? '' : code);
+  if (/雷/.test(wt)) return { text: '雷雨', icon: '⛈' };
+  const head = c.charAt(0);
+  if (head === '1') return c === '100' ? { text: '晴れ', icon: '☀' } : { text: '晴れ', icon: '🌤' };
+  if (head === '2') {
+    if (/霧/.test(wt)) return { text: '霧', icon: '🌫' };
+    return c === '200' ? { text: '曇り', icon: '☁' } : { text: '曇り', icon: '⛅' };
+  }
+  if (head === '3') {
+    return /大雨|暴風/.test(wt) ? { text: '大雨', icon: '☔' } : { text: '雨', icon: '☔' };
+  }
+  if (head === '4') {
+    return /大雪|暴風雪|風雪/.test(wt) ? { text: '大雪', icon: '☃' } : { text: '雪', icon: '☃' };
+  }
+  const short = wt.replace(/\u3000/g, '').slice(0, 6) || '曇り';
+  return { text: short, icon: '☁' };
+}
+
+function jmaDateOf(iso) {
+  return typeof iso === 'string' ? iso.slice(0, 10) : null;
+}
+
+function jmaNum(v) {
+  if (v == null) return null;
+  const s = String(v).trim();
+  if (s === '' || s === '--' || s === '‐') return null;
+  const n = parseInt(s, 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** timeDefines と値配列から { 日付: [値...] } を作る */
+function groupJmaByDate(timeDefines, values) {
+  const map = new Map();
+  (timeDefines || []).forEach((t, i) => {
+    const d = jmaDateOf(t);
+    if (!d) return;
+    if (!map.has(d)) map.set(d, []);
+    map.get(d).push(values ? values[i] : undefined);
+  });
+  return map;
+}
+
+/** エリア配列から対象区域を探す（無ければ先頭＝代表地点） */
+function findJmaArea(areas, code) {
+  if (!Array.isArray(areas) || areas.length === 0) return null;
+  return areas.find((a) => a && a.area && a.area.code === code) || areas[0] || null;
+}
+
+/**
+ * 気象庁の予報JSON（府県予報＋週間予報）から今日/明日/明後日の3日分を抜き出す。
+ * - 天気: 府県予報の概況（3日分あり）
+ * - 降水確率: 府県予報の時間帯別を日別最大に集約 → 無ければ週間予報
+ * - 気温: 府県予報の気温（00時=最低・それ以外=最高）→ 無ければ週間予報の tempsMin/tempsMax
+ */
+function parseJmaForecast(json, areaCode) {
+  const root = Array.isArray(json) ? json[0] : null;
+  const ts = (root && root.timeSeries) || [];
+  const weekly = (Array.isArray(json) && json[1] && json[1].timeSeries) || [];
+  const reportDatetime = (root && root.reportDatetime) || null;
+  const labels = ['今日', '明日', '明後日'];
+  const base = ((ts[0] && ts[0].timeDefines) || []).slice(0, 3);
+  const wArea = findJmaArea(ts[0] && ts[0].areas, areaCode);
+  const pArea = findJmaArea(ts[1] && ts[1].areas, areaCode);
+  const tArea = (ts[2] && ts[2].areas && ts[2].areas[0]) || null; // 気温は代表地点（先頭）
+  const wPopArea = findJmaArea(weekly[0] && weekly[0].areas, areaCode);
+  const wTempArea = (weekly[1] && weekly[1].areas && weekly[1].areas[0]) || null;
+  const popByDate = groupJmaByDate(ts[1] && ts[1].timeDefines, pArea && pArea.pops);
+  // 府県予報の気温を日別に振り分け
+  const tempMinByDate = new Map();
+  const tempMaxByDate = new Map();
+  const tTd = (ts[2] && ts[2].timeDefines) || [];
+  const tVals = (tArea && tArea.temps) || [];
+  tTd.forEach((t, i) => {
+    const d = jmaDateOf(t);
+    const n = jmaNum(tVals[i]);
+    if (!d || n == null) return;
+    const hour = parseInt(String(t).slice(11, 13), 10);
+    if (hour === 0) {
+      if (!tempMinByDate.has(d)) tempMinByDate.set(d, n);
+    } else if (!tempMaxByDate.has(d)) {
+      tempMaxByDate.set(d, n);
     }
-    const url =
-      `https://api.open-meteo.com/v1/forecast?latitude=${WEATHER_LAT}&longitude=${WEATHER_LON}` +
-      '&daily=weathercode,precipitation_probability_max,temperature_2m_max,temperature_2m_min' +
-      '&timezone=Asia%2FTokyo&forecast_days=3';
+  });
+  // 週間予報の日付→index
+  const wPopDates = ((weekly[0] && weekly[0].timeDefines) || []).map(jmaDateOf);
+  const wPops = (wPopArea && wPopArea.pops) || [];
+  const wTempDates = ((weekly[1] && weekly[1].timeDefines) || []).map(jmaDateOf);
+  const wMin = (wTempArea && wTempArea.tempsMin) || [];
+  const wMax = (wTempArea && wTempArea.tempsMax) || [];
+  const days = [0, 1, 2].map((i) => {
+    const iso = base[i] || null;
+    const date = jmaDateOf(iso);
+    const code = wArea && wArea.weatherCodes ? wArea.weatherCodes[i] : null;
+    const detailRaw = wArea && wArea.weathers ? wArea.weathers[i] : '';
+    const w = describeJmaWeather(code, detailRaw);
+    let precip = null;
+    if (date && popByDate.has(date)) {
+      let mx = null;
+      for (const v of popByDate.get(date)) {
+        const n = jmaNum(v);
+        if (n != null && (mx == null || n > mx)) mx = n;
+      }
+      precip = mx;
+    }
+    if (precip == null && date) {
+      const wi = wPopDates.indexOf(date);
+      if (wi >= 0) precip = jmaNum(wPops[wi]);
+    }
+    let tmax = date && tempMaxByDate.has(date) ? tempMaxByDate.get(date) : null;
+    let tmin = date && tempMinByDate.has(date) ? tempMinByDate.get(date) : null;
+    if (date && (tmax == null || tmin == null)) {
+      const wi = wTempDates.indexOf(date);
+      if (wi >= 0) {
+        if (tmax == null) tmax = jmaNum(wMax[wi]);
+        if (tmin == null) tmin = jmaNum(wMin[wi]);
+      }
+    }
+    return {
+      label: labels[i],
+      date,
+      code: code != null ? String(code) : null,
+      weather: w.text,
+      icon: w.icon,
+      detail: String(detailRaw == null ? '' : detailRaw).replace(/\u3000/g, ' '),
+      precip,
+      tmax,
+      tmin,
+    };
+  });
+  return { reportDatetime, days };
+}
+
+app.get('/api/weather', async (req, res) => {
+  const office = weatherAreaCode(settings.weatherArea);
+  const info = weatherAreaInfo(office);
+  try {
+    const hit = weatherCache.get(office);
+    if (hit && Date.now() - hit.at < WEATHER_TTL_MS) {
+      return res.json(hit.data);
+    }
+    const url = `https://www.jma.go.jp/bosai/forecast/data/forecast/${office}.json`;
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 10000);
     let apiJson = null;
@@ -1309,38 +1514,22 @@ app.get('/api/weather', async (req, res) => {
     } finally {
       clearTimeout(timer);
     }
-    const daily = (apiJson && apiJson.daily) || {};
-    const dates = Array.isArray(daily.time) ? daily.time : [];
-    const codes = Array.isArray(daily.weathercode) ? daily.weathercode : [];
-    const pops = Array.isArray(daily.precipitation_probability_max)
-      ? daily.precipitation_probability_max
-      : [];
-    const tmax = Array.isArray(daily.temperature_2m_max) ? daily.temperature_2m_max : [];
-    const tmin = Array.isArray(daily.temperature_2m_min) ? daily.temperature_2m_min : [];
-    const labels = ['今日', '明日', '明後日'];
-    const days = [0, 1, 2].map((i) => {
-      const w = describeWeather(codes[i]);
-      return {
-        label: labels[i],
-        date: dates[i] || null,
-        code: codes[i] != null ? codes[i] : null,
-        weather: w.text,
-        icon: w.icon,
-        precip: pops[i] != null ? pops[i] : null,
-        tmax: tmax[i] != null ? tmax[i] : null,
-        tmin: tmin[i] != null ? tmin[i] : null,
-      };
-    });
+    const parsed = parseJmaForecast(apiJson, info.area);
     const payload = {
       ok: true,
-      area: WEATHER_AREA,
+      pref: info.pref,
+      area: info.areaName,
+      officeCode: office,
+      areaCode: info.area,
+      reportDatetime: parsed.reportDatetime,
       updatedAt: new Date().toISOString(),
-      days,
+      days: parsed.days,
     };
-    weatherCache = { at: Date.now(), data: payload };
+    weatherCache.set(office, { at: Date.now(), data: payload });
     res.json(payload);
   } catch (e) {
-    if (weatherCache.data) return res.json(weatherCache.data);
+    const hit = weatherCache.get(office);
+    if (hit) return res.json(hit.data);
     res.status(502).json({ ok: false, error: '天気を取得できませんでした' });
   }
 });
@@ -1698,6 +1887,12 @@ module.exports = {
   loadFeeds,
   saveFeeds,
   describeWeather,
+  describeJmaWeather,
+  parseJmaForecast,
+  weatherAreaCode,
+  weatherAreaInfo,
+  WEATHER_AREAS,
+  WEATHER_DEFAULT_AREA,
   // 指示書 §3.4 の関数名との両対応エイリアス（実装名が正規。テストはどちらでも参照可）
   similarity: titleSimilarity,
   clusterItems: assignGroups,

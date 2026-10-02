@@ -50,6 +50,7 @@
   }
   #wxBox .wx-label { color: #8ab4ff; font-weight: 700; margin-right: 0.6vmin; }
   #wxBox .wx-pop { color: #9fc3ff; margin-left: 0.6vmin; }
+  #wxBox .wx-temp { color: #ffd9a0; margin-left: 0.6vmin; }
   #voiceWarn {
     display: none;
     width: 100%;
@@ -217,6 +218,7 @@
   body.light #wxBox .wx-item { background: #fff; border-color: #ccc; }
   body.light #wxBox .wx-label { color: #1a56db; }
   body.light #wxBox .wx-pop { color: #1a56db; }
+  body.light #wxBox .wx-temp { color: #b36b00; }
   body.light #voiceWarn { background: #fff3cd; color: #856404; }
   body.light #title { color: #111; }
   body.light #photo { background: #e0e0e0; }
@@ -279,7 +281,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.4.0</div>
+  <div id="ver">v.1.5.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -380,7 +382,7 @@ function updateTvClock() {
 updateTvClock();
 setInterval(updateTvClock, 5000);
 
-// 左上: 今日/明日/明後日の天気と降水確率（東京・/api/weather経由）
+// 左上: 今日/明日/明後日の天気・降水確率・気温（/api/weather＝気象庁API経由）
 async function fetchWeather() {
   try {
     const res = await fetch('/api/weather', { cache: 'no-store' });
@@ -404,9 +406,24 @@ async function fetchWeather() {
       box.appendChild(label);
       box.appendChild(main);
       box.appendChild(popEl);
-      box.title = (data.area || '') + ' ' + (day.date || '') +
-        (day.tmax != null ? ' 最高' + Math.round(day.tmax) + '℃' : '') +
-        (day.tmin != null ? ' 最低' + Math.round(day.tmin) + '℃' : '');
+      // 気温は「最高/最低℃」（例: 22/18℃）。片方だけの場合も分かる形で出す
+      let tempText = '';
+      if (day.tmax != null && day.tmin != null) {
+        tempText = ' ' + Math.round(day.tmax) + '/' + Math.round(day.tmin) + '℃';
+      } else if (day.tmax != null) {
+        tempText = ' 最高' + Math.round(day.tmax) + '℃';
+      } else if (day.tmin != null) {
+        tempText = ' 最低' + Math.round(day.tmin) + '℃';
+      }
+      if (tempText) {
+        const tempEl = document.createElement('span');
+        tempEl.className = 'wx-temp';
+        tempEl.textContent = tempText;
+        box.appendChild(tempEl);
+      }
+      const areaName = [data.pref, data.area].filter(Boolean).join(' ').trim();
+      box.title = [areaName, day.date, day.detail || '', tempText.trim()]
+        .filter(Boolean).join(' ').trim();
     });
   } catch (e) {
     if (elWx[0]) {

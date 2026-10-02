@@ -121,6 +121,62 @@
   <div><button class="primary" type="submit">設定を保存する</button></div>
 </form>
 
+<h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
+<form class="add" id="weatherForm">
+  <label>予報地域（トップ画面ヘッダーの天気表示に使用・気象庁の予報）
+    <select id="sWeather">
+      <option value="016000">北海道</option>
+      <option value="020000">青森県</option>
+      <option value="030000">岩手県</option>
+      <option value="040000">宮城県</option>
+      <option value="050000">秋田県</option>
+      <option value="060000">山形県</option>
+      <option value="070000">福島県</option>
+      <option value="080000">茨城県</option>
+      <option value="090000">栃木県</option>
+      <option value="100000">群馬県</option>
+      <option value="110000">埼玉県</option>
+      <option value="120000">千葉県</option>
+      <option value="130000">東京都</option>
+      <option value="140000">神奈川県</option>
+      <option value="150000">新潟県</option>
+      <option value="160000">富山県</option>
+      <option value="170000">石川県</option>
+      <option value="180000">福井県</option>
+      <option value="190000">山梨県</option>
+      <option value="200000">長野県</option>
+      <option value="210000">岐阜県</option>
+      <option value="220000">静岡県</option>
+      <option value="230000">愛知県</option>
+      <option value="240000">三重県</option>
+      <option value="250000">滋賀県</option>
+      <option value="260000">京都府</option>
+      <option value="270000">大阪府</option>
+      <option value="280000">兵庫県</option>
+      <option value="290000">奈良県</option>
+      <option value="300000">和歌山県</option>
+      <option value="310000">鳥取県</option>
+      <option value="320000">島根県</option>
+      <option value="330000">岡山県</option>
+      <option value="340000">広島県</option>
+      <option value="350000">山口県</option>
+      <option value="360000">徳島県</option>
+      <option value="370000">香川県</option>
+      <option value="380000">愛媛県</option>
+      <option value="390000">高知県</option>
+      <option value="400000">福岡県</option>
+      <option value="410000">佐賀県</option>
+      <option value="420000">長崎県</option>
+      <option value="430000">熊本県</option>
+      <option value="440000">大分県</option>
+      <option value="450000">宮崎県</option>
+      <option value="460100">鹿児島県</option>
+      <option value="471000">沖縄県</option>
+    </select>
+  </label>
+  <div><button class="primary" type="submit">天気の地域を保存する</button></div>
+</form>
+
 <h2 style="font-size:16px;margin:24px 0 10px;">エクスポート / インポート</h2>
 <div class="row">
   <button id="exportBtn">フィードをエクスポート (JSON)</button>
@@ -286,6 +342,7 @@ async function loadSettings() {
       document.getElementById('sTheme').value = s.theme;
       applyTheme(s.theme);
     }
+    if (s.weatherArea != null) document.getElementById('sWeather').value = String(s.weatherArea);
   } catch (e) { /* 無視 */ }
 }
 
@@ -319,6 +376,26 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
       ' / ' + (data.settings.theme === 'light' ? 'ライトモード' : 'ダークモード') + '）。', 'ok');
   } catch (e2) {
     showMsg('設定の保存に失敗しました: ' + e2.message, 'err');
+  }
+});
+
+document.getElementById('weatherForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  showMsg('');
+  const sel = document.getElementById('sWeather');
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ weatherArea: sel.value }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    sel.value = String(data.settings.weatherArea);
+    const label = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : sel.value;
+    showMsg('天気の地域を保存しました（' + label + '）。', 'ok');
+  } catch (e2) {
+    showMsg('天気の地域の保存に失敗しました: ' + e2.message, 'err');
   }
 });
 
