@@ -162,6 +162,11 @@ async function loadAll() {
     tr.innerHTML = '<td>' + (f.id ? esc(String(f.id).slice(0, 8)) : i) + '</td><td>' + esc(f.name) + '</td>' +
       '<td class="url">' + esc(f.url) + '</td><td>' + stHtml + '</td>';
     const td = document.createElement('td');
+    const refBtn = document.createElement('button');
+    refBtn.textContent = '再取得';
+    refBtn.style.marginRight = '8px';
+    refBtn.addEventListener('click', () => refreshFeed(f.id != null ? f.id : i, f.name, refBtn));
+    td.appendChild(refBtn);
     const btn = document.createElement('button');
     btn.className = 'danger';
     btn.textContent = '削除';
@@ -170,6 +175,22 @@ async function loadAll() {
     tr.appendChild(td);
     elRows.appendChild(tr);
   });
+}
+
+async function refreshFeed(idOrIndex, name, btn) {
+  showMsg('');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/feeds/' + encodeURIComponent(idOrIndex) + '/refresh', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+    showMsg('再取得しました: ' + name + '（' + (data.added != null ? '新規' + data.added + '件' : '') + '）', 'ok');
+    await loadAll();
+  } catch (e) {
+    showMsg('再取得に失敗しました: ' + e.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function removeFeed(idOrIndex, name) {

@@ -71,6 +71,14 @@
     word-break: break-word;
     margin-bottom: 2.5vmin;
   }
+  #photo {
+    display: none;
+    max-width: 100%; max-height: 30vh;
+    object-fit: contain;
+    border-radius: 1vmin;
+    margin-bottom: 2vmin;
+    background: #111;
+  }
   #body {
     font-size: 2.9vmin; font-weight: 400;
     line-height: 1.9;
@@ -190,6 +198,7 @@
   <div id="left">
     <div id="prefRow"><span id="pref">待機中</span><span id="groupBadge"></span></div>
     <div id="title">ニュースを読み込んでいます…</div>
+    <img id="photo" alt="" referrerpolicy="no-referrer" />
     <div id="body" class="empty"></div>
     <div id="related"></div>
     <div id="meta"></div>
@@ -255,6 +264,27 @@ const elErr = document.getElementById('err');
 const elVoiceWarn = document.getElementById('voiceWarn');
 const elList = document.getElementById('list');
 const elListCount = document.getElementById('listCount');
+const elPhoto = document.getElementById('photo');
+if (elPhoto) {
+  elPhoto.addEventListener('error', () => { hidePhoto(); });
+}
+
+function isHttpUrl(u) {
+  return typeof u === 'string' && /^https?:\/\//.test(u);
+}
+
+function showPhoto(url) {
+  if (!elPhoto) return;
+  if (!isHttpUrl(url)) { hidePhoto(); return; }
+  elPhoto.src = url;
+  elPhoto.style.display = 'block';
+}
+
+function hidePhoto() {
+  if (!elPhoto) return;
+  elPhoto.removeAttribute('src');
+  elPhoto.style.display = 'none';
+}
 
 setInterval(() => {
   elClock.textContent = new Date().toLocaleString('ja-JP');
@@ -311,6 +341,7 @@ function normalizePlaylist(data) {
       groupId: p.groupId || null,
       groupSize: p.groupSize || 1,
       id: p.id || null,
+      image: p.image || '',
     }));
   }
   // 旧応答フォールバック: prefectures[] を順に展開
@@ -324,7 +355,7 @@ function normalizePlaylist(data) {
         title: item.title, link: item.link || '', source: item.source || '',
         pubDate: item.pubDate || '', body: item.body || '', summary: item.summary || '',
         groupId: item.groupId || null, groupSize: item.groupSize || 1,
-        id: item.id || null,
+        id: item.id || null, image: item.image || '',
       });
     }
   }
@@ -364,18 +395,24 @@ async function loadVersion() {
   } catch (e) {}
 }
 
-// 本文が空の項目は /api/article で1回だけ補完を試みる（次回以降の読み上げ用に蓄える）
+// 本文・写真が空の項目は /api/article で1回だけ補完を試みる（次回以降の読み上げ用に蓄える）
 async function backfillBody(item) {
-  if (item.body || !item.link) return;
+  if ((item.body && item.image) || !item.link) return;
   try {
     const res = await fetch('/api/article?url=' + encodeURIComponent(item.link), { cache: 'no-store' });
     if (!res.ok) return;
     const data = await res.json();
-    if (data && data.body) {
+    if (data && data.body && !item.body) {
       item.body = data.body;
       item.summary = data.summary || '';
-      renderBody(item);
     }
+    if (data && data.image && !item.image) {
+      item.image = data.image;
+    }
+    // 既に次の記事へ移動していたら表示は触らない
+    if (playlist[idx] !== item) return;
+    renderBody(item);
+    if (item.image) showPhoto(item.image);
   } catch (e) { /* 失敗無視: タイトルのみ読み上げ */ }
 }
 
@@ -432,6 +469,7 @@ function showCurrent() {
   if (playlist.length === 0) {
     elPref.textContent = '待機中';
     elTitle.textContent = 'ニュースを取得中…';
+    hidePhoto();
     elBody.textContent = '';
     elRelated.textContent = '';
     elMeta.textContent = '';
@@ -442,6 +480,7 @@ function showCurrent() {
   const cur = playlist[idx];
   elPref.textContent = cur.prefecture;
   elTitle.textContent = cur.title;
+  showPhoto(cur.image);
   renderBody(cur);
   if (cur.groupSize > 1) {
     elGroup.style.display = 'inline-block';

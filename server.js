@@ -232,6 +232,8 @@ store.set('全国', []);
 
 // 記事本文キャッシュ: url -> body（store と二重保持。オンデマンド解決用）
 const bodyCache = new Map();
+// 記事写真キャッシュ: url -> imageUrl（og:image 等。store と二重保持）
+const imageCache = new Map();
 
 // フィード状態（/api/news の sources[]・/api/feeds の feeds[] として返却）
 function freshFeedState(f) {
@@ -254,6 +256,15 @@ let lastFetchResult = { ok: 0, ng: 0, items: 0, errors: [] };
 const parser = new Parser({
   timeout: 15000,
   headers: { 'User-Agent': BROWSER_UA },
+  // 写真抽出用: media:content / media:thumbnail を配列のまま保持する
+  customFields: {
+    feed: [],
+    item: [
+      ['media:content', 'media:content', { keepArray: true }],
+      ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
+      'media:group',
+    ],
+  },
 });
 
 /** タイトル正規化: 前後trim・連続する半角/全角空白を1つに圧縮（§4.2.1 重複排除用） */
@@ -273,7 +284,69 @@ function normalizeItem(raw, sourceName) {
     const t = Date.parse(pubDate);
     if (!Number.isNaN(t)) ts = new Date(t).toISOString();
   }
-  return { title, link, pubDate: ts, body, source: sourceName };
+  return { title, link, pubDate: ts, body, source: sourceName, image: extractFeedImage(raw) };
+}
+
+/** http(s) の画像URLか（data: URI や空文字を除外） */
+function isImageUrl(u) {
+  return typeof u === 'string' && /^https?:\/\//.test(u.trim());
+}
+
+/**
+ * RSS アイテムから写真URLを抜き出す。優先度:
+ * 1. enclosure（画像タイプ） 2. media:content（medium="image"） 3. media:thumbnail
+ * 4. media:group 配下の media:content 5. 本文HTML内の最初の <img>
+ */
+function extractFeedImage(raw) {
+  if (!raw || typeof raw !== 'object') return '';
+  const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []);
+  const attrsOf = (node) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.$ && typeof node.$ === 'object') return node.$;
+    if (typeof node.url === 'string') return node;
+    return null;
+  };
+  const pickMedia = (nodes) => {
+    for (const node of asList(nodes)) {
+      const a = attrsOf(node);
+      if (!a || !isImageUrl(a.url)) continue;
+      const medium = String(a.medium || '').toLowerCase();
+      const type = String(a.type || '').toLowerCase();
+      if (medium === 'image' || type.startsWith('image/')) return a.url.trim();
+      // medium/type 無記載でも拡張子が画像なら採用（video の誤採用は拡張子で回避）
+      if (!medium && !type && /\.(jpe?g|png|gif|webp|avif)(\?.*)?$/i.test(a.url)) {
+        return a.url.trim();
+      }
+    }
+    return '';
+  };
+  // 1. enclosure
+  const enc = raw.enclosure;
+  if (enc && isImageUrl(enc.url)) {
+    const t = String(enc.type || '').toLowerCase();
+    if (t.startsWith('image/') || /\.(jpe?g|png|gif|webp|avif)(\?.*)?$/i.test(enc.url)) {
+      return enc.url.trim();
+    }
+  }
+  // 2-3. media:content / media:thumbnail
+  const mc = pickMedia(raw['media:content']);
+  if (mc) return mc;
+  const mt = pickMedia(raw['media:thumbnail']);
+  if (mt) return mt;
+  // 4. media:group 配下
+  const groups = asList(raw['media:group']);
+  for (const g of groups) {
+    if (!g || typeof g !== 'object') continue;
+    const inner = pickMedia(g['media:content']) || pickMedia(g['media:thumbnail']);
+    if (inner) return inner;
+  }
+  // 5. 本文HTML内の最初の <img>（トラッキングピクセル等の data: URI は除外）
+  const html = (raw.content && raw.content.toString()) || '';
+  if (html) {
+    const m = html.match(/<img[^>]+src\s*=\s*["']([^"']+)["']/i);
+    if (m && m[1] && isImageUrl(m[1])) return m[1].trim();
+  }
+  return '';
 }
 
 // ---------- 要約（3行程度） ----------
@@ -538,9 +611,25 @@ function extractArticleDescription(html) {
   return '';
 }
 
-async function fetchArticleBody(url, timeoutMs = 10000) {
-  if (!url || !/^https?:\/\//.test(url)) return '';
-  if (bodyCache.has(url)) return bodyCache.get(url) || '';
+/** 記事HTMLから og:image（無ければ twitter:image）を抜き出す */
+function extractOgImage(html) {
+  if (!html) return '';
+  const og = extractMetaContent(html, 'property', 'og:image');
+  if (isImageUrl(og)) return og.trim();
+  const tw = extractMetaContent(html, 'name', 'twitter:image');
+  if (isImageUrl(tw)) return tw.trim();
+  return '';
+}
+
+/**
+ * 記事ページを1回取得して本文と写真URLを返す（og:image 優先）。
+ * キャッシュ済みの片方だけが無い場合も再取得せず、ある分だけ返す。
+ */
+async function fetchArticlePage(url, timeoutMs = 10000) {
+  if (!url || !/^https?:\/\//.test(url)) return { body: '', image: '' };
+  if (bodyCache.has(url) && imageCache.has(url)) {
+    return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
+  }
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -549,41 +638,70 @@ async function fetchArticleBody(url, timeoutMs = 10000) {
       headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,*/*' },
       redirect: 'follow',
     });
-    if (!res.ok) return '';
+    if (!res.ok) {
+      return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
+    }
     const html = await res.text();
     const body = extractArticleDescription(html);
+    const image = extractOgImage(html);
     bodyCache.set(url, body);
+    imageCache.set(url, image);
     if (bodyCache.size > 1000) {
       const first = bodyCache.keys().next().value;
       bodyCache.delete(first);
     }
-    return body;
+    if (imageCache.size > 1000) {
+      const first = imageCache.keys().next().value;
+      imageCache.delete(first);
+    }
+    return { body, image };
   } catch {
-    return '';
+    return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** body 未取得の記事に本文を付与する（並列数制限・上限付き・ベストエフォート） */
+async function fetchArticleBody(url, timeoutMs = 10000) {
+  if (!url || !/^https?:\/\//.test(url)) return '';
+  if (bodyCache.has(url)) return bodyCache.get(url) || '';
+  const { body } = await fetchArticlePage(url, timeoutMs);
+  return body;
+}
+
+/** body・image 未取得の記事に本文・写真を付与する（並列数制限・上限付き・ベストエフォート） */
 async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
-  const targets = items.filter((it) => it.link && !it.body).slice(0, limit);
+  const targets = items.filter((it) => it.link && (!it.body || !it.image)).slice(0, limit);
   let i = 0;
   async function worker() {
     while (i < targets.length) {
       const it = targets[i++];
-      const body = await fetchArticleBody(it.link);
-      if (body) {
+      // 両方キャッシュ済みなら取得不要（store 反映のみ）
+      let body = it.body || '';
+      let image = it.image || '';
+      if (!body || !image) {
+        const page = await fetchArticlePage(it.link);
+        if (!body && page.body) body = page.body;
+        if (!image && page.image) image = page.image;
+      }
+      if (body && !it.body) {
         it.body = body;
         it.summary = summarizeText(body);
         bodyCache.set(it.link, body);
-        // store 側の同一 link にも反映
-        for (const [, list] of store) {
-          for (const e of list) {
-            if (e.link === it.link && !e.body) {
+      }
+      if (image) {
+        if (!it.image) it.image = image;
+        imageCache.set(it.link, image);
+      }
+      // store 側の同一 link にも反映
+      for (const [, list] of store) {
+        for (const e of list) {
+          if (e.link === it.link) {
+            if (body && !e.body) {
               e.body = body;
-              e.summary = it.summary;
+              e.summary = it.summary || summarizeText(body);
             }
+            if (image && !e.image) e.image = image;
           }
         }
       }
@@ -629,10 +747,12 @@ function loadStore() {
               fetchedAt: e.fetchedAt,
               body: e.body || '',
               summary: e.summary || (e.body ? summarizeText(e.body) : ''),
+              image: e.image || '',
             }))
           );
           for (const e of store.get(p)) {
             if (e.link && e.body) bodyCache.set(e.link, e.body);
+            if (e.link && e.image) imageCache.set(e.link, e.image);
           }
         }
       }
@@ -723,6 +843,59 @@ function clearStore() {
   saveStore();
 }
 
+/**
+ * 1フィード分の取得アイテムを store に取り込む（一括・個別取得で共用）。
+ * 戻り値は新規追加件数。
+ */
+function ingestFeedItems(feed, items, fetchedAt) {
+  let added = 0;
+  for (const raw of items || []) {
+    const n = normalizeItem(raw, feed.name);
+    if (!n) continue;
+    const prefs = detectPrefectures(n.title, n.body);
+    const buckets = prefs.length > 0 ? prefs : ['全国'];
+    for (const pref of buckets) {
+      const list = store.get(pref) || [];
+      // 重複排除: 正規化タイトル or link をキーに同一県内の重複を除外
+      const normT = normalizeTitle(n.title);
+      const dup = list.find(
+        (e) => normalizeTitle(e.title) === normT || (n.link && e.link === n.link && n.link !== '')
+      );
+      if (dup) {
+        // 既存記事に写真が無く、今回の取得にあれば補完する
+        if (!dup.image && n.image) {
+          dup.image = n.image;
+          if (dup.link) imageCache.set(dup.link, n.image);
+        }
+        continue;
+      }
+      list.unshift({
+        prefecture: pref,
+        title: n.title,
+        link: n.link,
+        source: n.source,
+        pubDate: n.pubDate,
+        fetchedAt,
+        body: '',
+        summary: '',
+        image: n.image || '',
+      });
+      if (n.image && n.link) imageCache.set(n.link, n.image);
+      // pubDate 新しい順に並べ替え（pubDateなしは後ろ）→ 最新10件に trims
+      list.sort((a, b) => {
+        if (a.pubDate && b.pubDate) return b.pubDate.localeCompare(a.pubDate);
+        if (a.pubDate) return -1;
+        if (b.pubDate) return 1;
+        return b.fetchedAt.localeCompare(a.fetchedAt);
+      });
+      if (list.length > MAX_PER_PREF) list.length = MAX_PER_PREF;
+      store.set(pref, list);
+      added++;
+    }
+  }
+  return added;
+}
+
 async function fetchAllFeeds() {
   const fetchedAt = new Date().toISOString();
   // §4.2.1: Promise.allSettled で全 FEEDS を並列取得（無効フィードはスキップ）
@@ -756,40 +929,7 @@ async function fetchAllFeeds() {
         error: null,
       };
       console.log(`[取得] ${feed.name}: ${items.length}件`);
-      for (const raw of items) {
-        const n = normalizeItem(raw, feed.name);
-        if (!n) continue;
-        const prefs = detectPrefectures(n.title, n.body);
-        const buckets = prefs.length > 0 ? prefs : ['全国'];
-        for (const pref of buckets) {
-          const list = store.get(pref) || [];
-          // 重複排除: 正規化タイトル or link をキーに同一県内の重複を除外
-          const normT = normalizeTitle(n.title);
-          const dup = list.some(
-            (e) => normalizeTitle(e.title) === normT || (n.link && e.link === n.link && n.link !== '')
-          );
-          if (dup) continue;
-          list.unshift({
-            prefecture: pref,
-            title: n.title,
-            link: n.link,
-            source: n.source,
-            pubDate: n.pubDate,
-            fetchedAt,
-            body: '',
-            summary: '',
-          });
-          // pubDate 新しい順に並べ替え（pubDateなしは後ろ）→ 最新10件に trims
-          list.sort((a, b) => {
-            if (a.pubDate && b.pubDate) return b.pubDate.localeCompare(a.pubDate);
-            if (a.pubDate) return -1;
-            if (b.pubDate) return 1;
-            return b.fetchedAt.localeCompare(a.fetchedAt);
-          });
-          if (list.length > MAX_PER_PREF) list.length = MAX_PER_PREF;
-          store.set(pref, list);
-        }
-      }
+      ingestFeedItems(feed, items, fetchedAt);
     } else {
       ng++;
       const msg = String((r.reason && r.reason.message) || r.reason);
@@ -847,6 +987,7 @@ function flatItems() {
         fetchedAt: e.fetchedAt,
         body: e.body || bodyCache.get(e.link) || '',
         summary: e.summary || summarizeText(e.body || bodyCache.get(e.link) || ''),
+        image: e.image || imageCache.get(e.link) || '',
       });
     }
   }
@@ -889,6 +1030,7 @@ function buildPrefectures() {
         const g = byKey.get(memberKey(e, pref));
         const body = e.body || bodyCache.get(e.link) || '';
         const summary = e.summary || summarizeText(body);
+        const image = e.image || imageCache.get(e.link) || '';
         const members = (g && membersByGroup.get(g.groupId)) || [];
         return {
           title: e.title,
@@ -898,6 +1040,7 @@ function buildPrefectures() {
           fetchedAt: e.fetchedAt,
           body,
           summary,
+          image,
           groupId: g ? g.groupId : null,
           groupSize: g ? g.groupSize : 1,
           id: articleId(e.link, e.title),
@@ -1199,13 +1342,7 @@ app.post('/api/feeds', (req, res) => {
 
 app.delete('/api/feeds/:index', (req, res) => {
   // 後方互換: 数値なら index、そうでなければ id（URL の SHA-1 先頭12桁）として解決
-  const raw = String(req.params.index || '');
-  let idx = -1;
-  if (/^\d+$/.test(raw)) {
-    idx = Number.parseInt(raw, 10);
-  } else {
-    idx = FEEDS.findIndex((f) => feedId(f.url) === raw);
-  }
+  const idx = resolveFeedIndex(String(req.params.index || ''));
   if (!Number.isInteger(idx) || idx < 0 || idx >= FEEDS.length) {
     return res.status(404).json({ ok: false, error: '指定のフィードが見つかりません' });
   }
@@ -1229,22 +1366,82 @@ app.get('/api/article', async (req, res) => {
   for (const [, list] of store) {
     const hit = list.find((e) => e.link === url && e.body);
     if (hit) {
-      return res.json({ ok: true, url, body: hit.body, summary: hit.summary || summarizeText(hit.body), cached: true });
+      const image = hit.image || imageCache.get(url) || '';
+      return res.json({ ok: true, url, body: hit.body, summary: hit.summary || summarizeText(hit.body), image, cached: true });
     }
   }
-  const body = await fetchArticleBody(url);
-  if (!body) return res.status(502).json({ ok: false, error: '本文を取得できませんでした' });
+  const { body, image } = await fetchArticlePage(url);
+  if (!body && !image) return res.status(502).json({ ok: false, error: '本文を取得できませんでした' });
   // store 側にも反映して永続化
   for (const [, list] of store) {
     for (const e of list) {
       if (e.link === url) {
-        e.body = body;
-        e.summary = summarizeText(body);
+        if (body) {
+          e.body = body;
+          e.summary = summarizeText(body);
+        }
+        if (image) e.image = image;
       }
     }
   }
   saveStore();
-  res.json({ ok: true, url, body, summary: summarizeText(body), cached: false });
+  res.json({ ok: true, url, body, summary: summarizeText(body), image: image || '', cached: false });
+});
+
+// ---- 個別フィードの再取得（管理画面の「再取得」ボタン用） ----
+/** 数値 index またはフィード id（URL の SHA-1 先頭12桁）から FEEDS の添字を解決する */
+function resolveFeedIndex(raw) {
+  if (/^\d+$/.test(raw || '')) return Number.parseInt(raw, 10);
+  return FEEDS.findIndex((f) => feedId(f.url) === raw);
+}
+
+app.post('/api/feeds/:id/refresh', async (req, res) => {
+  const idx = resolveFeedIndex(String(req.params.id || ''));
+  if (!Number.isInteger(idx) || idx < 0 || idx >= FEEDS.length) {
+    return res.status(404).json({ ok: false, error: '指定のフィードが見つかりません' });
+  }
+  const feed = FEEDS[idx];
+  if (feed.enabled === false) {
+    return res.status(400).json({ ok: false, error: '無効なフィードです' });
+  }
+  try {
+    const parsed = await parser.parseURL(feed.url);
+    const items = (parsed && parsed.items) || [];
+    const fetchedAt = new Date().toISOString();
+    const added = ingestFeedItems(feed, items, fetchedAt);
+    feedStates[idx] = {
+      id: feedId(feed.url),
+      name: feed.name,
+      url: feed.url,
+      enabled: true,
+      ok: true,
+      items: items.length,
+      error: null,
+    };
+    lastUpdatedAt = fetchedAt;
+    saveStore();
+    console.log(`[個別取得] ${feed.name}: ${items.length}件（新規${added}件）`);
+    // 本文・写真の追いかけ取得は背景で行う（応答は待たない）
+    fillMissingBodies(
+      [...store.values()].flat().sort((a, b) => (b.fetchedAt || '').localeCompare(a.fetchedAt || '')),
+      { limit: 30 }
+    ).then(() => saveStore()).catch((e) => console.error('body fill after single refresh failed:', e));
+    res.json({ ok: true, feed: feedStates[idx], added, lastFetchAt: fetchedAt });
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    feedStates[idx] = {
+      id: feedId(feed.url),
+      name: feed.name,
+      url: feed.url,
+      enabled: true,
+      ok: false,
+      items: 0,
+      error: msg,
+    };
+    saveStore();
+    console.warn(`[個別取得失敗] ${feed.name}: ${msg}`);
+    res.status(502).json({ ok: false, error: msg });
+  }
 });
 
 // 手動再取得（管理画面用。指示書準拠の /api/feeds/refresh が正規。/api/refresh は後方互換の別名）
@@ -1318,6 +1515,11 @@ module.exports = {
   extractMetaContent,
   extractArticleDescription,
   fetchArticleBody,
+  fetchArticlePage,
+  extractFeedImage,
+  extractOgImage,
+  ingestFeedItems,
+  resolveFeedIndex,
   feedId,
   articleId,
   loadFeeds,
