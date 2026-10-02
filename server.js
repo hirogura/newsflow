@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -187,6 +187,216 @@ function scheduleFetch() {
 function controlEnabled() {
   const v = process.env.DISABLE_CONTROL;
   return !(v === '1' || v === 'true');
+}
+
+// ---------- 緊急地震速報 (EEW / Wolfx Open API WebSocket) ----------
+// サーバーが Wolfx の WebSocket を購読し、ブラウザへは SSE で push する。
+// 環境変数: EEW_ENABLED（既定で有効。0/false/off/no で無効）/ EEW_WS_URL（既定 jma_eew）
+const EEW_WS_URL = process.env.EEW_WS_URL || 'wss://ws-api.wolfx.jp/jma_eew';
+const EEW_RECONNECT_MIN_MS = 5000;
+const EEW_RECONNECT_MAX_MS = 60000;
+const EEW_PING_INTERVAL_MS = 50 * 1000;
+
+function eewEnabled() {
+  const raw = process.env.EEW_ENABLED;
+  if (raw == null || String(raw).trim() === '') return true;
+  const v = String(raw).trim().toLowerCase();
+  return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
+}
+
+let latestEew = null;
+let eewConnected = false;
+let eewLastHeartbeatAt = null;
+let eewLastEewAt = null;
+let eewWs = null;
+let eewReconnectTimer = null;
+let eewPingTimer = null;
+let eewBackoffMs = EEW_RECONNECT_MIN_MS;
+const eewSseClients = new Set();
+
+/**
+ * Wolfx の EEW 生 JSON を画面配信用に正規化する（純粋関数）。
+ * heartbeat・EEW 以外は null を返す。
+ * heartbeat 以外の判定は EventID / Hypocenter / Title の有無で行う
+ * （実データに type フィールドが無いことがあるため）。
+ * Magunitude は公式の綴り（Magnitude ではなく Magunitude）。両方受け付ける。
+ */
+function normalizeEew(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (raw.type === 'heartbeat') return null;
+  const hasEewKey = raw.EventID != null || raw.Hypocenter != null || raw.Title != null;
+  if (!hasEewKey) return null;
+  const issue = raw.Issue && typeof raw.Issue === 'object' ? raw.Issue : {};
+  const magRaw = raw.Magunitude != null ? raw.Magunitude : raw.Magnitude;
+  const warnAreas = Array.isArray(raw.WarnArea)
+    ? raw.WarnArea.filter((w) => w && typeof w === 'object').map((w) => ({
+        chiiki: w.Chiiki != null ? String(w.Chiiki) : '',
+        shindo1: w.Shindo1 != null ? String(w.Shindo1) : '',
+        shindo2: w.Shindo2 != null ? String(w.Shindo2) : '',
+        time: w.Time != null ? String(w.Time) : '',
+        type: w.Type != null ? String(w.Type) : '',
+        arrive: w.Arrive != null ? String(w.Arrive) : '',
+      }))
+    : [];
+  return {
+    type: 'eew',
+    title: raw.Title != null ? String(raw.Title) : '',
+    codeType: raw.CodeType != null ? String(raw.CodeType) : '',
+    source: issue.Source != null ? String(issue.Source) : '',
+    status: issue.Status != null ? String(issue.Status) : '',
+    eventId: raw.EventID != null ? String(raw.EventID) : '',
+    serial: raw.Serial != null ? String(raw.Serial) : '',
+    announcedTime: raw.AnnouncedTime != null ? String(raw.AnnouncedTime) : '',
+    originTime: raw.OriginTime != null ? String(raw.OriginTime) : '',
+    hypocenter: raw.Hypocenter != null ? String(raw.Hypocenter) : '',
+    latitude: raw.Latitude != null ? String(raw.Latitude) : '',
+    longitude: raw.Longitude != null ? String(raw.Longitude) : '',
+    magnitude: magRaw != null ? String(magRaw) : '',
+    depth: raw.Depth != null ? String(raw.Depth) : '',
+    maxIntensity: raw.MaxIntensity != null ? String(raw.MaxIntensity) : '',
+    warnAreas,
+    isSea: !!raw.isSea,
+    isTraining: !!raw.isTraining,
+    isAssumption: !!raw.isAssumption,
+    isWarn: !!raw.isWarn,
+    isFinal: !!raw.isFinal,
+    isCancel: !!raw.isCancel,
+    originalText: raw.OriginalText != null ? String(raw.OriginalText) : '',
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+/** 正規化済み EEW を SSE 購読者全員へ配信する */
+function broadcastEew(eew) {
+  if (!eew) return;
+  const payload = `event: eew\ndata: ${JSON.stringify(eew)}\n\n`;
+  for (const res of [...eewSseClients]) {
+    try {
+      res.write(payload);
+    } catch (e) {
+      try { eewSseClients.delete(res); } catch (_) {}
+    }
+  }
+}
+
+/** Wolfx からの1メッセージを処理する（heartbeat 応答 / EEW 配信） */
+function handleEewMessage(data) {
+  let msg = null;
+  if (typeof data === 'string') {
+    const t = data.trim();
+    if (t === '' || t === 'pong') return;
+    try {
+      msg = JSON.parse(t);
+    } catch {
+      return;
+    }
+  } else if (data && typeof data === 'object') {
+    msg = data;
+  } else {
+    return;
+  }
+  if (!msg || typeof msg !== 'object') return;
+  if (msg.type === 'heartbeat') {
+    eewLastHeartbeatAt = new Date().toISOString();
+    try {
+      if (eewWs && eewWs.readyState === 1) {
+        eewWs.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+      }
+    } catch (_) {}
+    return;
+  }
+  const eew = normalizeEew(msg);
+  if (!eew) return;
+  latestEew = eew;
+  eewLastEewAt = eew.receivedAt;
+  console.log(`[EEW] 受信: ${eew.title} ${eew.hypocenter} M${eew.magnitude} ${eew.maxIntensity}`);
+  broadcastEew(eew);
+}
+
+function clearEewTimers() {
+  if (eewPingTimer) { clearInterval(eewPingTimer); eewPingTimer = null; }
+  if (eewReconnectTimer) { clearTimeout(eewReconnectTimer); eewReconnectTimer = null; }
+}
+
+function scheduleEewReconnect() {
+  if (!eewEnabled()) return;
+  if (eewReconnectTimer) return;
+  const wait = Math.min(eewBackoffMs, EEW_RECONNECT_MAX_MS);
+  eewBackoffMs = Math.min(eewBackoffMs * 2, EEW_RECONNECT_MAX_MS);
+  console.warn(`[EEW] ${Math.round(wait / 1000)}秒後に再接続します (${EEW_WS_URL})`);
+  eewReconnectTimer = setTimeout(() => {
+    eewReconnectTimer = null;
+    connectEew();
+  }, wait);
+  if (eewReconnectTimer.unref) eewReconnectTimer.unref();
+}
+
+/** Wolfx WebSocket へ接続する（切断時は指数バックオフで再接続） */
+function connectEew() {
+  if (!eewEnabled()) return;
+  if (typeof WebSocket === 'undefined') {
+    console.warn('[EEW] グローバル WebSocket が無いため EEW 監視を開始できません');
+    return;
+  }
+  if (eewWs) {
+    try { eewWs.close(); } catch (_) {}
+    eewWs = null;
+  }
+  let ws;
+  try {
+    ws = new WebSocket(EEW_WS_URL);
+  } catch (e) {
+    console.warn('[EEW] 接続に失敗しました:', String((e && e.message) || e));
+    scheduleEewReconnect();
+    return;
+  }
+  eewWs = ws;
+  ws.onopen = () => {
+    eewConnected = true;
+    eewBackoffMs = EEW_RECONNECT_MIN_MS;
+    console.log(`[EEW] 接続しました (${EEW_WS_URL})`);
+    if (eewPingTimer) clearInterval(eewPingTimer);
+    eewPingTimer = setInterval(() => {
+      try {
+        if (ws.readyState === 1) ws.send('ping');
+      } catch (_) {}
+      // heartbeat が3分以上途絶えたら張り直す
+      if (eewLastHeartbeatAt) {
+        const gap = Date.now() - Date.parse(eewLastHeartbeatAt);
+        if (Number.isFinite(gap) && gap > 3 * 60 * 1000) {
+          try { ws.close(); } catch (_) {}
+        }
+      }
+    }, EEW_PING_INTERVAL_MS);
+    if (eewPingTimer.unref) eewPingTimer.unref();
+  };
+  ws.onmessage = (ev) => {
+    try {
+      handleEewMessage(ev && ev.data);
+    } catch (e) {
+      console.warn('[EEW] メッセージ処理に失敗:', String((e && e.message) || e));
+    }
+  };
+  ws.onerror = (e) => {
+    console.warn('[EEW] エラー:', String((e && e.message) || e));
+  };
+  ws.onclose = () => {
+    if (eewWs === ws) eewWs = null;
+    eewConnected = false;
+    if (eewPingTimer) { clearInterval(eewPingTimer); eewPingTimer = null; }
+    console.warn('[EEW] 切断しました');
+    scheduleEewReconnect();
+  };
+}
+
+/** EEW 監視を開始する（無効時は開始しない。main() から呼ぶ） */
+function startEewWatcher() {
+  if (!eewEnabled()) {
+    console.log('[EEW] 無効化されています (EEW_ENABLED=0)');
+    return;
+  }
+  eewBackoffMs = EEW_RECONNECT_MIN_MS;
+  connectEew();
 }
 
 // 47都道府県（北→南の順序。HTTP応答の順序にも使用）
@@ -1310,6 +1520,102 @@ app.get('/api/version', (req, res) => {
   res.json({ ok: true, version: VERSION, display: `v.${VERSION}` });
 });
 
+// ---- 緊急地震速報 (EEW) ----
+// 最新状態の取得（ポーリング用。push は /api/eew/stream の SSE を使う）
+app.get('/api/eew', (req, res) => {
+  res.json({
+    ok: true,
+    enabled: eewEnabled(),
+    connected: eewConnected,
+    wsUrl: EEW_WS_URL,
+    lastHeartbeatAt: eewLastHeartbeatAt,
+    lastEewAt: eewLastEewAt,
+    eew: latestEew,
+  });
+});
+
+// SSE で EEW を push 配信する（フロントは EventSource で購読）
+app.get('/api/eew/stream', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+  // 接続時点の最新 EEW があれば即送る
+  if (latestEew) {
+    res.write(`event: eew\ndata: ${JSON.stringify(latestEew)}\n\n`);
+  }
+  eewSseClients.add(res);
+  const keepalive = setInterval(() => {
+    try { res.write(': keepalive\n\n'); } catch (_) {}
+  }, 25 * 1000);
+  if (keepalive.unref) keepalive.unref();
+  req.on('close', () => {
+    clearInterval(keepalive);
+    eewSseClients.delete(res);
+  });
+});
+
+// 模擬発報（表示確認用。制御系 API と同じく DISABLE_CONTROL=1 で無効化）
+app.post('/api/eew/mock', (req, res) => {
+  if (!controlEnabled()) {
+    return res.status(403).json({ ok: false, error: '制御APIは無効化されています (DISABLE_CONTROL=1)' });
+  }
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const pick = (...keys) => {
+    for (const k of keys) {
+      if (body[k] != null && body[k] !== '') return body[k];
+    }
+    return undefined;
+  };
+  const raw = {
+    Title: pick('Title', 'title') != null ? String(pick('Title', 'title')) : '緊急地震速報（予報）',
+    CodeType: pick('CodeType', 'codeType') != null ? String(pick('CodeType', 'codeType')) : '32',
+    Issue: { Source: '気象庁', Status: '通常' },
+    EventID: pick('EventID', 'eventId') != null ? String(pick('EventID', 'eventId')) : 'mock-event',
+    Serial: pick('Serial', 'serial') != null ? String(pick('Serial', 'serial')) : '1',
+    AnnouncedTime: pick('AnnouncedTime', 'announcedTime') || '2026/10/02 12:00:00',
+    OriginTime: pick('OriginTime', 'originTime') || '2026/10/02 11:59:55',
+    Hypocenter: pick('Hypocenter', 'hypocenter') != null ? String(pick('Hypocenter', 'hypocenter')) : 'テスト震源',
+    Latitude: pick('Latitude', 'latitude') != null ? String(pick('Latitude', 'latitude')) : '35.6',
+    Longitude: pick('Longitude', 'longitude') != null ? String(pick('Longitude', 'longitude')) : '140.1',
+    Magunitude: pick('Magunitude', 'Magnitude', 'magnitude') != null
+      ? String(pick('Magunitude', 'Magnitude', 'magnitude'))
+      : '6.0',
+    Depth: pick('Depth', 'depth') != null ? String(pick('Depth', 'depth')) : '50km',
+    MaxIntensity: pick('MaxIntensity', 'maxIntensity') != null ? String(pick('MaxIntensity', 'maxIntensity')) : '5弱',
+    WarnArea: Array.isArray(body.WarnArea) ? body.WarnArea
+      : Array.isArray(body.warnAreas) ? body.warnAreas.map((w) => ({
+          Chiiki: w.chiiki || w.Chiiki, Shindo1: w.shindo1 || w.Shindo1,
+          Shindo2: w.shindo2 || w.Shindo2, Time: w.time || w.Time,
+          Type: w.type || w.Type, Arrive: w.arrive || w.Arrive,
+        }))
+      : [{ Chiiki: 'テスト地域', Shindo1: '5弱', Shindo2: '', Time: '', Type: '緊急地震速報（予報）', Arrive: '' }],
+    isWarn: body.isWarn !== undefined ? !!body.isWarn : true,
+    isFinal: !!body.isFinal,
+    isCancel: !!body.isCancel,
+    isTraining: !!body.isTraining,
+    isAssumption: !!body.isAssumption,
+    isSea: !!body.isSea,
+    OriginalText: pick('OriginalText', 'originalText') != null ? String(pick('OriginalText', 'originalText')) : '',
+  };
+  const eew = normalizeEew(raw) || {
+    type: 'eew',
+    title: raw.Title,
+    hypocenter: raw.Hypocenter,
+    magnitude: raw.Magunitude,
+    maxIntensity: raw.MaxIntensity,
+    receivedAt: new Date().toISOString(),
+  };
+  eew.isMock = true;
+  eew.receivedAt = new Date().toISOString();
+  latestEew = eew;
+  eewLastEewAt = eew.receivedAt;
+  broadcastEew(eew);
+  res.json({ ok: true, eew });
+});
+
 // ---- 天気予報 API（気象庁API。設定の地域（都道府県→代表の一次細分区域）の今日/明日/明後日を返す） ----
 const WEATHER_DEFAULT_AREA = '130000'; // 東京
 // 予報区コード → { pref（都道府県）, area（一次細分区域コード）, areaName }。
@@ -1898,6 +2204,7 @@ async function main() {
   loadSettings();
   applyIntervalSettings();
   loadStore();
+  startEewWatcher();
   // 起動直後に1回取得（失敗してもサーバーは起動する）
   await fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
   scheduleFetch();
@@ -1974,6 +2281,16 @@ module.exports = {
   weatherAreaInfo,
   WEATHER_AREAS,
   WEATHER_DEFAULT_AREA,
+  // 緊急地震速報 (EEW / Wolfx)
+  EEW_WS_URL,
+  eewEnabled,
+  normalizeEew,
+  handleEewMessage,
+  broadcastEew,
+  startEewWatcher,
+  connectEew,
+  get latestEew() { return latestEew; },
+  get eewConnected() { return eewConnected; },
   // 指示書 §3.4 の関数名との両対応エイリアス（実装名が正規。テストはどちらでも参照可）
   similarity: titleSimilarity,
   clusterItems: assignGroups,

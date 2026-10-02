@@ -59,6 +59,24 @@
     padding: 0.8vmin;
     position: fixed; top: 0; left: 0; z-index: 5;
   }
+  /* 緊急地震速報 (EEW) 警告バー: 受信時に画面最上部へ表示し、1分後に自動消去 */
+  #eewBar {
+    display: none;
+    width: 100%;
+    background: #b00000; color: #fff;
+    font-size: 2.8vmin; font-weight: 800; text-align: center;
+    line-height: 1.6;
+    padding: 1vmin 2vmin;
+    position: fixed; top: 0; left: 0; z-index: 6;
+    box-shadow: 0 0.4vmin 1.2vmin rgba(0,0,0,0.6);
+    animation: eewFlash 1s steps(2, start) infinite;
+  }
+  #eewBar .eew-title { display: block; font-size: 3.2vmin; letter-spacing: 0.1em; }
+  #eewBar .eew-detail { display: block; font-size: 2.4vmin; font-weight: 700; }
+  @keyframes eewFlash {
+    0%, 49% { background: #b00000; }
+    50%, 100% { background: #e00; }
+  }
   #main {
     display: flex;
     width: 100vw; height: 95vh;
@@ -291,6 +309,7 @@
 <body>
 <script>try { var _t = localStorage.getItem('newsflow-theme'); if (_t === 'light' || _t === 'light-modern') document.body.classList.add(_t); } catch (e) {}</script>
 <div id="voiceWarn">日本語音声が見つかりません。ブラウザの音声設定を確認してください。</div>
+<div id="eewBar" role="alert" style="display:none;"><span class="eew-title"></span><span class="eew-detail"></span></div>
 <div id="header">
   <div id="headLeft">
     <span id="tvClock">--:--</span>
@@ -325,7 +344,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.8.1</div>
+  <div id="ver">v.1.9.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -478,6 +497,51 @@ async function fetchWeather() {
 }
 fetchWeather();
 setInterval(fetchWeather, 30 * 60 * 1000);
+
+// 緊急地震速報 (EEW): サーバーの SSE を購読し、受信時に警告バーを表示する（1分後に自動消去）
+let eewHideTimer = null;
+function showEewBar(eew) {
+  const bar = document.getElementById('eewBar');
+  if (!bar || !eew) return;
+  const title = bar.querySelector('.eew-title');
+  const detail = bar.querySelector('.eew-detail');
+  const label = eew.isCancel ? '【緊急地震速報（キャンセル）】'
+    : eew.isTraining ? '【緊急地震速報（訓練）】'
+    : '【緊急地震速報】';
+  if (title) title.textContent = label + ' ' + (eew.title || '');
+  const parts = [];
+  if (eew.hypocenter) parts.push('震源: ' + eew.hypocenter);
+  if (eew.maxIntensity) parts.push('最大震度: ' + eew.maxIntensity);
+  if (eew.magnitude) parts.push('M' + eew.magnitude);
+  if (eew.announcedTime) parts.push(eew.announcedTime + ' 発表');
+  if (detail) detail.textContent = parts.join(' / ');
+  bar.style.display = 'block';
+  if (eewHideTimer) clearTimeout(eewHideTimer);
+  eewHideTimer = setTimeout(() => {
+    eewHideTimer = null;
+    bar.style.display = 'none';
+  }, 60 * 1000);
+}
+function subscribeEew() {
+  try {
+    if (typeof EventSource === 'undefined') return;
+    const es = new EventSource('/api/eew/stream');
+    es.addEventListener('eew', (ev) => {
+      try {
+        showEewBar(JSON.parse(ev.data));
+      } catch (e) { /* 受信データ異常は無視 */ }
+    });
+    es.onerror = () => { /* 自動再接続に任せる */ };
+  } catch (e) { /* SSE 未対応でもニュース再生は継続 */ }
+}
+subscribeEew();
+// リロード直後に速報が出ていた場合の取りこぼし対策（1分以内のものだけ表示）
+fetch('/api/eew', { cache: 'no-store' }).then((r) => r.json()).then((d) => {
+  if (d && d.eew && d.eew.receivedAt) {
+    const age = Date.now() - Date.parse(d.eew.receivedAt);
+    if (Number.isFinite(age) && age >= 0 && age < 60 * 1000) showEewBar(d.eew);
+  }
+}).catch(() => {});
 
 function pickVoice() {
   try {

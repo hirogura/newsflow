@@ -212,6 +212,18 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
   `summary` / `bodyExcerpt` を `/api/news` で配信します。本文が無い記事はタイトルのみ読み上げます。
 - 環境変数 `BODY_FETCH=0` で記事本文の取得を無効化できます。
 
+## 緊急地震速報 (EEW / Wolfx Open API)
+
+- サーバーが Wolfx Open API の WebSocket（既定 `wss://ws-api.wolfx.jp/jma_eew`、気象庁の緊急地震速報）を購読します。
+  追加の依存パッケージは不要です（Node 標準のグローバル `WebSocket` を使用）。
+- heartbeat 受信時は `pong` を返し、切断時は指数バックオフ（5秒→最大60秒）で再接続します。
+  約50秒ごとに `ping` を送り、heartbeat が3分以上途絶えた場合も張り直します。
+- 受信した速報は正規化 (`normalizeEew`) のうえ、ブラウザへ SSE (`GET /api/eew/stream`、`EventSource` で購読) で push します。
+  メイン画面は受信時に画面最上部へ警告バー (`#eewBar`、震源・最大震度・マグニチュード等) を表示し、受信から1分後に自動で消します。
+- `GET /api/eew` で最新状態（接続状態・最終 heartbeat・最新の速報）を取得できます。
+- `POST /api/eew/mock` で模擬発報ができます（表示確認用。制御系 API と同じく `DISABLE_CONTROL=1` で無効化）。
+  例: `curl -X POST http://127.0.0.1:3364/api/eew/mock`
+
 ## 類似記事グループ化
 
 - タイトル類似度は内容語トークン（文字バイグラム＋語彙。日付・時刻・数字のみのトークンは除外）の
@@ -234,6 +246,8 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
 | `BODY_READ_CHARS` | `220` | 読み上げ本文の最大文字数（3 行相当の目安） |
 | `SIMILARITY_THRESHOLD` | `0.5` | 類似判定しきい値の目安（現行は複合ルールで等価管理） |
 | `BODY_CACHE_MAX` | `2000` | 本文キャッシュ最大件数（現行は 1000 件で古いものから破棄） |
+| `EEW_ENABLED` | `1` | 緊急地震速報の購読（`0`/`false`/`off`/`no` で無効。既定は有効） |
+| `EEW_WS_URL` | `wss://ws-api.wolfx.jp/jma_eew` | EEW 購読先の WebSocket URL |
 
 ## アンインストール
 
