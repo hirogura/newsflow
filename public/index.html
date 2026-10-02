@@ -90,6 +90,9 @@
     word-break: break-word;
     margin-bottom: 2.5vmin;
   }
+  #title.linkable { cursor: pointer; }
+  #title.linkable:hover { text-decoration: underline; }
+  #title.linkable:focus-visible { outline: 2px solid #2f6fd0; outline-offset: 0.4vmin; }
   #photo {
     display: none;
     max-width: 100%; max-height: 30vh;
@@ -276,7 +279,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.2.0</div>
+  <div id="ver">v.1.3.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -341,6 +344,29 @@ function hidePhoto() {
   if (!elPhoto) return;
   elPhoto.removeAttribute('src');
   elPhoto.style.display = 'none';
+}
+
+// メイン画面の記事タイトルをクリックすると元記事を別タブで開く
+function currentLink() {
+  if (!Array.isArray(playlist) || playlist.length === 0) return '';
+  const cur = playlist[idx];
+  const url = cur && cur.link;
+  return isHttpUrl(url) ? url : '';
+}
+function openCurrentLink() {
+  const url = currentLink();
+  if (!url) return;
+  window.open(url, '_blank', 'noopener');
+}
+if (elTitle) {
+  elTitle.addEventListener('click', openCurrentLink);
+  elTitle.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation(); // 文書側のスペース=一時停止・再開と二重動作させない
+      openCurrentLink();
+    }
+  });
 }
 
 // 左上: テレビニュース風の時計（時：分・少し大きめのオーバーレイ表示）
@@ -587,6 +613,10 @@ function showCurrent() {
   if (playlist.length === 0) {
     elPref.textContent = '待機中';
     elTitle.textContent = 'ニュースを取得中…';
+    elTitle.classList.remove('linkable');
+    elTitle.removeAttribute('tabindex');
+    elTitle.removeAttribute('role');
+    elTitle.removeAttribute('title');
     hidePhoto();
     elBody.textContent = '';
     elRelated.textContent = '';
@@ -598,6 +628,17 @@ function showCurrent() {
   const cur = playlist[idx];
   elPref.textContent = cur.prefecture;
   elTitle.textContent = cur.title;
+  if (isHttpUrl(cur.link)) {
+    elTitle.classList.add('linkable');
+    elTitle.setAttribute('tabindex', '0');
+    elTitle.setAttribute('role', 'link');
+    elTitle.setAttribute('title', '元記事を別タブで開く');
+  } else {
+    elTitle.classList.remove('linkable');
+    elTitle.removeAttribute('tabindex');
+    elTitle.removeAttribute('role');
+    elTitle.removeAttribute('title');
+  }
   showPhoto(cur.image);
   renderBody(cur);
   if (cur.groupSize > 1) {
