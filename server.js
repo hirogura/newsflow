@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.7.0';
+const VERSION = '1.8.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -49,7 +49,7 @@ const DEFAULT_SETTINGS = {
   maxAgeHours: 24, // この時間以内のニュースのみ表示
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
-  theme: 'dark', // 画面テーマ（'dark' / 'light'）
+  theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
 
@@ -107,7 +107,7 @@ function normalizeSettings(input, base) {
   }
   if (src.theme !== undefined) {
     const t = String(src.theme).toLowerCase();
-    s.theme = t === 'light' ? 'light' : t === 'dark' ? 'dark' : b.theme;
+    s.theme = t === 'light' ? 'light' : t === 'light-modern' ? 'light-modern' : t === 'dark' ? 'dark' : b.theme;
   }
   if (src.weatherArea !== undefined) {
     // 気象庁の予報区コードのみ受け付ける（未知値は維持/既定に寄せる）

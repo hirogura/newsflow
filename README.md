@@ -176,7 +176,7 @@ sudo pacman -S speech-dispatcher espeak-ng
 - エクスポート: `GET /api/feeds/export`（管理画面のボタンで JSON 保存）。
 - インポート: `POST /api/feeds/import`（`{ feeds, mode: "replace"|"merge" }`）。
 - 表示・読み上げ設定: `GET/PUT /api/settings`
-  （取得間隔 5〜180分 / N時間以内の表示 1〜168時間 / 読み上げ On-Off / 速度5段階 0.8,1.0,1.2,1.4,1.6 / 画面テーマ dark・light）。
+  （取得間隔 5〜180分 / N時間以内の表示 1〜168時間 / 読み上げ On-Off / 速度5段階 0.8,1.0,1.2,1.4,1.6 / 画面テーマ dark・light・light-modern）。
   テーマはサーバーに保持され、サイネージ画面と管理画面の両方に反映されます。
 
 ## トップ画面の操作ボタン

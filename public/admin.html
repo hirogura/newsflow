@@ -66,10 +66,28 @@
   body.light form.add label { color: #555; }
   body.light form.add input, body.light form.add select { background: #fff; color: #222; border-color: #bbb; }
   body.light #msg.err { color: #c00; } body.light #msg.ok { color: #1e7e34; }
+  /* ライトモダン（テレビのニュースダイジェスト風。body.light-modern のみ。dark/light は不変） */
+  body.light-modern { background: #edf1f4; color: #111; }
+  body.light-modern .sub { color: #667; }
+  body.light-modern a { color: #0090a8; }
+  body.light-modern #status { background: #fff; border-color: #d5e2e6; border-left: 6px solid #00bfa5; border-radius: 10px; color: #555; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  body.light-modern th, body.light-modern td { border-bottom-color: #d5e2e6; }
+  body.light-modern th { color: #667; }
+  body.light-modern td.url { color: #0090a8; }
+  body.light-modern button { background: #fff; color: #222; border-color: #bfe3ea; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  body.light-modern button:hover { background: #e6f7fa; }
+  body.light-modern button.danger { background: #f8d7da; border-color: #c66; color: #721c24; }
+  body.light-modern button.danger:hover { background: #f1b0b7; }
+  body.light-modern button.primary { background: linear-gradient(135deg, #00b8c4, #00d68a); border-color: transparent; color: #fff; box-shadow: 0 2px 8px rgba(0,180,170,0.35); }
+  body.light-modern button.primary:hover { filter: brightness(1.05); }
+  body.light-modern form.add { background: #fff; border-color: #d5e2e6; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  body.light-modern form.add label { color: #555; }
+  body.light-modern form.add input, body.light-modern form.add select { background: #fff; color: #222; border-color: #bfe3ea; }
+  body.light-modern #msg.err { color: #c00; } body.light-modern #msg.ok { color: #007a5e; }
 </style>
 </head>
 <body>
-<script>try { if (localStorage.getItem('newsflow-theme') === 'light') document.body.classList.add('light'); } catch (e) {}</script>
+<script>try { var _t = localStorage.getItem('newsflow-theme'); if (_t === 'light' || _t === 'light-modern') document.body.classList.add(_t); } catch (e) {}</script>
 <h1>RSSフィード管理</h1>
 <div class="sub"><a href="/">← サイネージに戻る</a></div>
 <div id="status">読み込み中…</div>
@@ -116,6 +134,7 @@
     <select id="sTheme">
       <option value="dark">ダークモード</option>
       <option value="light">ライトモード</option>
+      <option value="light-modern">ライトモダン</option>
     </select>
   </label>
   <div><button class="primary" type="submit">設定を保存する</button></div>
@@ -354,9 +373,10 @@ document.getElementById('refreshBtn').addEventListener('click', async () => {
 });
 
 function applyTheme(theme) {
-  const light = theme === 'light';
-  document.body.classList.toggle('light', light);
-  try { localStorage.setItem('newsflow-theme', light ? 'light' : 'dark'); } catch (e) {}
+  const t = theme === 'light-modern' ? 'light-modern' : theme === 'light' ? 'light' : 'dark';
+  document.body.classList.toggle('light', t === 'light');
+  document.body.classList.toggle('light-modern', t === 'light-modern');
+  try { localStorage.setItem('newsflow-theme', t); } catch (e) {}
 }
 
 async function loadSettings() {
@@ -369,7 +389,7 @@ async function loadSettings() {
     if (s.maxAgeHours != null) document.getElementById('sMaxAge').value = s.maxAgeHours;
     document.getElementById('sTts').value = s.ttsEnabled === false ? 'off' : 'on';
     if (s.ttsRate != null) document.getElementById('sRate').value = String(s.ttsRate);
-    if (s.theme === 'light' || s.theme === 'dark') {
+    if (s.theme === 'light' || s.theme === 'dark' || s.theme === 'light-modern') {
       document.getElementById('sTheme').value = s.theme;
       applyTheme(s.theme);
     }
@@ -404,7 +424,7 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
     showMsg('設定を保存しました（取得間隔 ' + data.settings.fetchIntervalMinutes + '分 / ' +
       data.settings.maxAgeHours + '時間以内を表示 / 読み上げ' +
       (data.settings.ttsEnabled ? 'On' : 'Off') + ' / 速度' + data.settings.ttsRate +
-      ' / ' + (data.settings.theme === 'light' ? 'ライトモード' : 'ダークモード') + '）。', 'ok');
+      ' / ' + (data.settings.theme === 'light-modern' ? 'ライトモダン' : data.settings.theme === 'light' ? 'ライトモード' : 'ダークモード') + '）。', 'ok');
   } catch (e2) {
     showMsg('設定の保存に失敗しました: ' + e2.message, 'err');
   }
