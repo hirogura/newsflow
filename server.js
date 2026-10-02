@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -200,6 +200,25 @@ const PREF_KEYWORDS = PREFECTURES.map((pref) => ({
   keywords: pref === shortName(pref) ? [pref] : [pref, shortName(pref)],
 }));
 
+// ---------- 話題別フィード（地域判定をせず、URL で話題バケットに振り分ける） ----------
+// Yahoo!ニュース・トピックス RSS 等、地域以外のニュースを混ぜたい場合に登録する。
+// ここに載せた URL のフィードから来た記事は、タイトル中の地名にかかわらず話題バケット行きになる。
+const TOPIC_FEEDS = {
+  'https://news.yahoo.co.jp/rss/topics/world.xml': '国際',
+  'https://news.yahoo.co.jp/rss/topics/it.xml': 'IT',
+  'https://news.yahoo.co.jp/rss/topics/science.xml': '科学',
+};
+// 話題バケット名の一覧（北→南のような固定順序。playlist では「全国」の後に配置）
+const TOPIC_CATEGORIES = [...new Set(Object.values(TOPIC_FEEDS))];
+const TOPIC_FEED_MAP = new Map(
+  Object.entries(TOPIC_FEEDS).map(([u, c]) => [normalizeFeedUrl(u), c])
+);
+
+/** フィードURLから話題カテゴリを返す。該当なしは null（通常の都道府県判定へ） */
+function topicCategoryForFeed(url) {
+  return TOPIC_FEED_MAP.get(normalizeFeedUrl(url)) || null;
+}
+
 /**
  * タイトル＋本文から都道府県を判定（複数ヒット可）
  * @returns {string[]} ヒットした都道府県名配列（なければ空配列）
@@ -229,6 +248,7 @@ function detectPrefectures(title, body) {
 const store = new Map();
 for (const p of PREFECTURES) store.set(p, []);
 store.set('全国', []);
+for (const c of TOPIC_CATEGORIES) store.set(c, []);
 
 // 記事本文キャッシュ: url -> body（store と二重保持。オンデマンド解決用）
 const bodyCache = new Map();
@@ -734,7 +754,7 @@ function loadStore() {
     if (!fs.existsSync(DATA_FILE)) return;
     const raw = JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
     if (raw && raw.store) {
-      for (const p of [...PREFECTURES, '全国']) {
+      for (const p of [...PREFECTURES, '全国', ...TOPIC_CATEGORIES]) {
         if (Array.isArray(raw.store[p])) {
           store.set(
             p,
@@ -839,7 +859,7 @@ function saveFeeds() {
 
 /** 全 store を空にして永続化する（フィード削除時の古い記事残存を防ぐ） */
 function clearStore() {
-  for (const p of [...PREFECTURES, '全国']) store.set(p, []);
+  for (const p of [...PREFECTURES, '全国', ...TOPIC_CATEGORIES]) store.set(p, []);
   saveStore();
 }
 
@@ -849,11 +869,13 @@ function clearStore() {
  */
 function ingestFeedItems(feed, items, fetchedAt) {
   let added = 0;
+  // 話題別フィードは都道府県判定をせず、話題バケットに直行させる
+  const topic = topicCategoryForFeed(feed.url);
   for (const raw of items || []) {
     const n = normalizeItem(raw, feed.name);
     if (!n) continue;
-    const prefs = detectPrefectures(n.title, n.body);
-    const buckets = prefs.length > 0 ? prefs : ['全国'];
+    const prefs = topic ? [] : detectPrefectures(n.title, n.body);
+    const buckets = topic ? [topic] : prefs.length > 0 ? prefs : ['全国'];
     for (const pref of buckets) {
       const list = store.get(pref) || [];
       // 重複排除: 正規化タイトル or link をキーに同一県内の重複を除外
@@ -974,7 +996,7 @@ async function fetchAllFeeds() {
 function flatItems() {
   const out = [];
   const nowMs = Date.now();
-  for (const pref of [...PREFECTURES, '全国']) {
+  for (const pref of [...PREFECTURES, '全国', ...TOPIC_CATEGORIES]) {
     const list = store.get(pref) || [];
     for (const e of list) {
       if (!isWithinHours(e, settings.maxAgeHours, nowMs)) continue;
@@ -1056,16 +1078,19 @@ function buildPrefectures() {
 /**
  * サイネージ再生用の全体プレイリストを構築する。
  * - 類似グループを割り当てた上で、同一 groupId が連続しないよう分散配置する。
- * - 「全国」バケットは末尾に回す（ローカル優先）。
+ * - 「全国」バケットは末尾に回す（ローカル優先）。話題バケット（国際/IT/科学）はさらに後ろ。
  */
 function buildPlaylist() {
   const flat = flatItems();
-  const local = flat.filter((e) => e.prefecture !== '全国');
+  const isLocal = (e) => PREFECTURES.includes(e.prefecture);
+  const local = flat.filter(isLocal);
   const national = flat.filter((e) => e.prefecture === '全国');
+  const topical = flat.filter((e) => TOPIC_CATEGORIES.includes(e.prefecture));
   const { items: grouped } = assignGroups(local);
   const ordered = interleaveAvoidSameGroup(grouped);
   const { items: groupedNat } = assignGroups(national);
-  const all = [...ordered, ...interleaveAvoidSameGroup(groupedNat)];
+  const { items: groupedTop } = assignGroups(topical);
+  const all = [...ordered, ...interleaveAvoidSameGroup(groupedNat), ...interleaveAvoidSameGroup(groupedTop)];
   // playlist 要素にも id / bodyExcerpt / related を付与（追加のみ。既存キーは不変）
   const membersByGroup = new Map();
   for (const it of all) {
@@ -1102,7 +1127,7 @@ function buildGroups() {
 function totalNewsCount() {
   const nowMs = Date.now();
   let n = 0;
-  for (const p of PREFECTURES) {
+  for (const p of [...PREFECTURES, ...TOPIC_CATEGORIES]) {
     const list = store.get(p) || [];
     for (const e of list) {
       if (isWithinHours(e, settings.maxAgeHours, nowMs)) n++;
@@ -1497,11 +1522,15 @@ module.exports = {
   detectPrefectures,
   PREFECTURES,
   PREF_KEYWORDS,
+  TOPIC_FEEDS,
+  TOPIC_CATEGORIES,
+  topicCategoryForFeed,
   FEEDS,
   store,
   buildPrefectures,
   buildPlaylist,
   buildGroups,
+  totalNewsCount,
   assignGroups,
   interleaveAvoidSameGroup,
   summarizeText,

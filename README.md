@@ -1,4 +1,4 @@
-# newsflow — ニュース連続再生デジタルサイネージ (v.0.6.0)
+# newsflow — ニュース連続再生デジタルサイネージ (v.0.7.0)
 
 Ubuntu 26.04 LXD コンテナ内で RSS からローカルニュースを定期収集し、
 ブラウザの Web Speech API で日本語 TTS として24時間ノンストップで読み上げる
@@ -82,7 +82,7 @@ curl -s http://127.0.0.1:3364/api/news | head -c 400
 ## 6. ブラウザで閲覧
 
 - `http://<host>:3364/` をブラウザで開きます。
-- トップ画面の版表示 `v.0.6.0` のほか、「ニュース再生を開始する」ボタンの下に
+- トップ画面の版表示 `v.0.7.0` のほか、「ニュース再生を開始する」ボタンの下に
   小さな「設定/RSSフィード管理」「アップデート」「再起動」ボタンを用意しています。
 
 開いたら「ニュース再生を開始する」ボタンをクリックしてください
@@ -139,6 +139,11 @@ sudo pacman -S speech-dispatcher espeak-ng
 - 登録中のフィード一覧（取得状態 OK/失敗・件数・無効表示）、追加フォーム（名前・URL）、
   削除ボタン（確認後に削除）、各フィード行の「再取得」ボタン（`POST /api/feeds/:id/refresh` で個別再取得）、
   「今すぐ再取得する」ボタン（`POST /api/feeds/refresh` で一括再取得）を提供します。
+- 話題別フィード：以下のURLのフィードは、タイトル中の地名にかかわらず話題バケット
+  （「国際」「IT」「科学」）に振り分けられ、地域ニュースの後に再生されます。
+  - 国際：`https://news.yahoo.co.jp/rss/topics/world.xml`
+  - IT：`https://news.yahoo.co.jp/rss/topics/it.xml`
+  - 科学：`https://news.yahoo.co.jp/rss/topics/science.xml`
 - フィード定義は `data/feeds.json` に永続化されます。削除時は store をクリアして
   再取得するため、削除したフィード由来の記事は一覧から消えます（件数は取得周期で回復）。
 - 登録フィード（`data/feeds.json` 等の個人データ）は `.gitignore` で除外されており、
@@ -156,7 +161,7 @@ sudo pacman -S speech-dispatcher espeak-ng
   実行します（再起動時に自動再取得）。完了まで数十秒かかるため、画面の案内に従ってリロードしてください。
 - 「再起動」: `POST /api/restart` で systemd サービス `newsflow` を再起動します。
 - 制御系 API は環境変数 `DISABLE_CONTROL=1` で無効化できます（無効時は 403 を返します）。
-- バージョンは `GET /api/version`（`{ version, display: "v.0.6.0" }`）でも取得できます。
+- バージョンは `GET /api/version`（`{ version, display: "v.0.7.0" }`）でも取得できます。
 
 ## ライセンス
 
