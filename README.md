@@ -162,12 +162,8 @@ sudo pacman -S speech-dispatcher espeak-ng
 - 登録中のフィード一覧（取得状態 OK/失敗・件数・無効表示）、追加フォーム（名前・URL）、
   削除ボタン（確認後に削除）、各フィード行の「再取得」ボタン（`POST /api/feeds/:id/refresh` で個別再取得）、
   「今すぐ再取得する」ボタン（`POST /api/feeds/refresh` で一括再取得）を提供します。
-- 話題別フィード：以下のURLのフィードは、タイトル中の地名にかかわらず話題バケット
+- 話題別フィード：特定のURLのフィードは、タイトル中の地名にかかわらず話題バケット
   （「国際」「IT」「科学」「海外」）に振り分けられ、地域ニュースの後に再生されます。
-  - 国際：`https://news.yahoo.co.jp/rss/topics/world.xml`
-  - IT：`https://news.yahoo.co.jp/rss/topics/it.xml`、`https://rss.itmedia.co.jp/rss/2.0/news_bursts.xml`
-  - 科学：`https://news.yahoo.co.jp/rss/topics/science.xml`
-  - 海外：`https://feeds.cnn.co.jp/rss/cnn/cnn.rdf`、`http://feeds.afpbb.com/rss/afpbb/afpbbnews`
 - フィード定義は `data/feeds.json` に永続化されます。削除時は store をクリアして
   再取得するため、削除したフィード由来の記事は一覧から消えます（件数は取得周期で回復）。
 - 登録フィード（`data/feeds.json` 等の個人データ）は `.gitignore` で除外されており、
