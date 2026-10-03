@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.1';
+const VERSION = '2.4.2';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1649,6 +1649,8 @@ function ingestFeedItems(feed, items, fetchedAt) {
   let added = 0;
   // 話題別フィードは都道府県判定をせず、話題バケットに直行させる
   const topic = topicCategoryForFeed(feed.url);
+  const enabledIds = enabledFeedIds();
+  const incomingId = feedId(feed.url);
   for (const raw of items || []) {
     const n = normalizeItem(raw, feed.name);
     if (!n) continue;
@@ -1662,6 +1664,13 @@ function ingestFeedItems(feed, items, fetchedAt) {
         (e) => normalizeTitle(e.title) === normT || (n.link && e.link === n.link && n.link !== '')
       );
       if (dup) {
+        // 同一記事を現在も配信中のフィードへ付け替える。
+        // 付け替え前が無効フィード由来の場合のみ行う（両方有効時の表示名フラップ防止）。
+        // v2.4.2: 無効化RSSと同URLのサイト登録記事が表示されない問題の修正。
+        if (dup.feedId !== incomingId && !enabledIds.has(dup.feedId)) {
+          dup.feedId = incomingId;
+          dup.source = n.source;
+        }
         // 既存記事に写真・本文が無く、今回の取得にあれば補完する（本文は長い方を残す）
         if (!dup.image && n.image) {
           dup.image = n.image;
@@ -1699,12 +1708,15 @@ function ingestFeedItems(feed, items, fetchedAt) {
           bodyCache.delete(first);
         }
       }
-      // pubDate 新しい順に並べ替え（pubDateなしは後ろ）→ 最新10件に trims
+      // pubDate 新しい順に並べ替え（pubDate無しは fetchedAt で代用）→ 最新10件に trim。
+      // サイト直接登録の記事（pubDate無し）が取得直後に末尾へ回り足切りされないための措置（v2.4.2）。
       list.sort((a, b) => {
-        if (a.pubDate && b.pubDate) return b.pubDate.localeCompare(a.pubDate);
-        if (a.pubDate) return -1;
-        if (b.pubDate) return 1;
-        return b.fetchedAt.localeCompare(a.fetchedAt);
+        const ka = a.pubDate || a.fetchedAt || '';
+        const kb = b.pubDate || b.fetchedAt || '';
+        if (ka && kb && ka !== kb) return kb.localeCompare(ka);
+        if (ka) return -1;
+        if (kb) return 1;
+        return 0;
       });
       if (list.length > MAX_PER_PREF) list.length = MAX_PER_PREF;
       store.set(pref, list);
