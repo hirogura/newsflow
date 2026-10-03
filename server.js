@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.3';
+const VERSION = '2.4.4';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -660,7 +660,20 @@ function extractRssBody(raw) {
 const PARAGRAPH_STOP_PREFIXES = [
   'あわせて読みたい',
   '関連記事',
+  '関連ニュース',
   'おすすめ記事',
+  // 有料壁の会員勧誘（無料分の末尾・または全文が勧誘の場合はそこで打ち切る）
+  '有料会員',
+  '会員限定',
+  '有料登録',
+  '無料登録',
+  '無料会員',
+  '登録すると続き',
+  '続きをお読み',
+  'この記事は会員限定',
+  '企業での記事共有',
+  'すべての記事が読み放題',
+  '※掲載される投稿は',
   '[Copyright',
   'Copyright',
 ];
@@ -675,6 +688,41 @@ function isBoilerplateParagraph(t) {
   if (s.length < 80 && s.includes('詳しくはこちら')) return true;
   return false;
 }
+/**
+ * 段落先頭のシェアボタン文言（「メールでシェアする Facebookでシェアする …」等）を除去する。
+ * タグ境界が空白化されるため、先頭の文言ランを空白区切りで繰り返し剥がす。
+ * 「ツイートするには」のように後に文字が続く場合は剥がさない（本文の可能性があるため）。
+ */
+const SHARE_LEAD_RE =
+  /^(?:\S{0,16}?(?:シェアする|ツイートする|ポストする)|はてなブックマークでシェアする|はてブ|LINEで送る|LINEに送る|ブックマークする|お気に入りに登録する?|クリップする)\s+/;
+function cleanShareLead(t) {
+  let s = String(t == null ? '' : t);
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(SHARE_LEAD_RE, '');
+  } while (s !== prev);
+  return s.trim();
+}
+
+/**
+ * アプリ誘導・広告の短文かどうか（本文は続くため打ち切らず読み飛ばす）。
+ * 例: [PR] / 「雨雲レーダーは「NHK ONE …」で」/ 「…を詳しく」/ 「…リアルタイム表示」
+ */
+function isPromoParagraph(t) {
+  const s = String(t || '').trim();
+  if (!s || s.length > 80) return false;
+  if (/^(\[PR\]|【PR】|PR[:：]|広告)/.test(s)) return true;
+  if (s.includes('NHK ONE')) return true;
+  if (/詳しく$/.test(s)) return true;
+  if (/リアルタイム表示$/.test(s)) return true;
+  if (s.includes('まとめ読みがしやすくなります')) return true;
+  return false;
+}
+
+/** 文末記号（本文らしい終わり）。「…」で終わるNHK式の文も本文扱いにする */
+const SENTENCE_END_RE = /[。！？!?…」』）］〉》.]$/;
+
 function extractMainParagraphs(html) {
   if (!html) return [];
   let scope = String(html);
@@ -688,12 +736,35 @@ function extractMainParagraphs(html) {
     if (mainStart !== -1 && mainEnd > mainStart) scope = scope.slice(mainStart, mainEnd);
   }
   const out = [];
-  for (const m of scope.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)) {
-    let t = m[1].replace(/<[^>]+>/g, ' ');
+  let nonSentenceRun = 0; // 句点なし短文の連続数（関連見出しラン検出用）
+  // ※ v2.4.4: <p> の直後に英字が続く場合（<path> <picture> <pre> 等）は除外する。
+  // 従来は <path d="..."> の「<p」に誤マッチし、SVG・広告JSまで段落に飲み込んでいた。
+  for (const m of scope.matchAll(/<p(?![a-zA-Z])[^>]*>([\s\S]*?)<\/p(?![a-zA-Z])>/gi)) {
+    // <p> 内に紛れた <script> は中身ごと除去してからタグを剥がす（広告JS混入対策）
+    let t = m[1].replace(/<script[\s\S]*?<\/script>/gi, ' ');
+    t = t.replace(/<[^>]+>/g, ' ');
     t = decodeEntities(t).replace(/\s+/g, ' ').trim();
+    t = cleanShareLead(t);
+    if (!t) continue;
+    // 埋め込みJS断片が残っていたらその段落は捨てる（本文は続く）
+    if (/googletag|console\.(log|error|warn|info|debug)|document\.write/.test(t)) continue;
+    if (isPromoParagraph(t)) continue;
     if (t.length < 20 || isJunkBody(t)) continue;
-    // 本文末尾の関連・広告欄に入ったら打ち切る（本文段落のみ採用）
+    // 本文末尾の関連・広告・有料壁の勧誘に入ったら打ち切る（本文段落のみ採用）
     if (isBoilerplateParagraph(t)) break;
+    // 句点なし短文の連続は関連見出し群とみなす（直前の1件を取り除いて打ち切る。
+    // 写真キャプション等の単発は残す。長文フラグメントは本文扱いで計数リセット）
+    if (SENTENCE_END_RE.test(t)) {
+      nonSentenceRun = 0;
+    } else if (t.length < 80) {
+      nonSentenceRun += 1;
+      if (nonSentenceRun >= 2) {
+        out.pop();
+        break;
+      }
+    } else {
+      nonSentenceRun = 0;
+    }
     out.push(t);
     if (out.join('').length >= ARTICLE_BODY_MAX_CHARS) break;
   }
@@ -1118,6 +1189,9 @@ const JUNK_BODY_PATTERNS = [
   '読売新聞販売店',
   '読者会員',
   'ご購読の確認',
+  // 他紙の有料壁定型文（本文の代わりに勧誘文しか無い場合の除外用）
+  'この記事は会員限定',
+  '登録すると続きをお読み',
 ];
 
 /**
@@ -2911,6 +2985,8 @@ module.exports = {
   extractSiteLinks,
   cleanAnchorText,
   isArticleLikeUrl,
+  cleanShareLead,
+  isPromoParagraph,
   scrapeSiteFeed,
   resolveFeedIndex,
   feedId,
