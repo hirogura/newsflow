@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.9.2';
+const VERSION = '1.9.3';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -2007,7 +2007,9 @@ app.post('/api/update', (req, res) => {
   }
   res.json({ ok: true, message: 'GitHub から更新を取得し、依存更新後に再起動します' });
   // 背景で git pull → npm install → restart（再起動時に自動再取得される）
-  const cmd = 'git pull --ff-only && npm install --no-audit --no-fund && systemctl restart newsflow';
+  // npm install が package-lock.json の version を自動更新して作業ツリーを汚し、
+  // 次回の `git pull --ff-only` が失敗するのを防ぐため、pull 前に自動生成差分を破棄する
+  const cmd = 'git fetch origin && (git checkout -- package-lock.json package.json 2>/dev/null || true) && git pull --ff-only && npm install --no-audit --no-fund && systemctl restart newsflow';
   exec(cmd, { cwd: __dirname, timeout: 5 * 60 * 1000 }, (err, stdout, stderr) => {
     if (err) {
       console.error('update failed:', String((err && err.message) || err), stdout, stderr);
