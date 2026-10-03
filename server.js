@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.4';
+const VERSION = '2.4.5';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -674,6 +674,7 @@ const PARAGRAPH_STOP_PREFIXES = [
   '企業での記事共有',
   'すべての記事が読み放題',
   '※掲載される投稿は',
+  '※無料期間中に',
   '[Copyright',
   'Copyright',
 ];
@@ -777,8 +778,9 @@ function pickLongerBody(a, b) {
   const sb = String(b == null ? '' : b);
   if (!sa) return sb;
   if (!sb) return sa;
-  const ea = stripReadMore(sa).trim().length;
-  const eb = stripReadMore(sb).trim().length;
+  // 残渣（シェア文言・広告JS等）を除いた実質長で比較する（v2.4.5: 旧キャッシュのゴミが長いだけで勝たない）
+  const ea = stripReadMore(sanitizeBodyText(sa)).trim().length;
+  const eb = stripReadMore(sanitizeBodyText(sb)).trim().length;
   return eb > ea ? sb : sa;
 }
 
@@ -1244,9 +1246,31 @@ function decodeJsonEscapes(s) {
   return t.split(BS).join('\\');
 }
 
+/**
+ * 本文テキストの残渣除去（v2.4.5）。
+ * 旧バージョンでキャッシュされた「シェアボタン文言＋広告JS＋[PR]」付き本文や
+ * RSS 由来の同様の混入を、表示・保存の各経路で修復するための集中処理。
+ * cleanBody系の先頭で適用する（写真キャプション等の本文情報は残す）。
+ */
+function sanitizeBodyText(t) {
+  let s = decodeJsonEscapes(t);
+  if (!s) return s;
+  // 先頭のシェアボタン文言ランを除去
+  let prev;
+  do {
+    prev = s;
+    s = cleanShareLead(s);
+  } while (s !== prev);
+  // 埋め込み広告JSのスパン除去（JSコード内に「。」は現れない前提。残渣のみを狙う）
+  s = s.replace(/(console\.\w+|googletag|setTimeout\s*\()[^。]{0,1000}?\}\)\s*;?/g, ' ');
+  // 広告マーカー除去
+  s = s.replace(/\[PR\]|【PR】/g, ' ');
+  return s.replace(/\s+/g, ' ').trim();
+}
+
 /** ゴミ本文なら ''、そうでなければ原文を返す */
 function cleanBodyText(text) {
-  const s = decodeJsonEscapes(text);
+  const s = sanitizeBodyText(text);
   if (!s) return s;
   return isJunkBody(s) ? '' : s;
 }
@@ -1266,7 +1290,7 @@ function isYomiuriPaywallResidue(link, body) {
 
 /** ゴミ本文・有料壁残渣なら ''、そうでなければ原文を返す（link 付き版） */
 function cleanBodyWithLink(text, link) {
-  const s = decodeJsonEscapes(text);
+  const s = sanitizeBodyText(text);
   if (!s) return s;
   if (isJunkBody(s)) return '';
   if (isYomiuriPaywallResidue(link, s)) return '';
@@ -2968,6 +2992,7 @@ module.exports = {
   isJunkBody,
   cleanBodyText,
   decodeJsonEscapes,
+  sanitizeBodyText,
   stripBreadcrumbPrefix,
   isYomiuriPaywallResidue,
   cleanBodyWithLink,
