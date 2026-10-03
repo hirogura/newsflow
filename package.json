@@ -1,6 +1,6 @@
 {
   "name": "newsflow",
-  "version": "1.9.3",
+  "version": "1.9.4",
   "private": true,
   "description": "47都道府県ローカルニュース 24時間連続再生デジタルサイネージ (MVP)",
   "main": "server.js",

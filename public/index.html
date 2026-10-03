@@ -89,26 +89,30 @@
     padding: 3vmin 4vmin;
     overflow: hidden;
   }
-  #prefRow { display: flex; align-items: center; gap: 1.5vmin; margin-bottom: 2vmin; flex-wrap: wrap; }
-  #pref {
-    display: inline-block;
-    font-size: 4vmin; font-weight: 700;
-    background: #c00; color: #fff;
-    border-radius: 1vmin; padding: 0.5vmin 3vmin;
-    letter-spacing: 0.1em;
-  }
-  #groupBadge {
-    display: none;
-    font-size: 2.4vmin; font-weight: 700;
-    background: #0a4d8c; color: #cfe8ff;
-    border-radius: 1vmin; padding: 0.5vmin 2vmin;
-  }
   #title {
     font-size: 4.6vmin; font-weight: 700;
     line-height: 1.5;
     word-break: break-word;
     margin-bottom: 2.5vmin;
   }
+  /* 左下フッター: 都道府県バッジ + 媒体/日時・件数（タイトルを一番上に上げるため下へ移動） */
+  #footRow { display: flex; align-items: center; gap: 1.5vmin; margin-top: 2.5vmin; flex-wrap: wrap; }
+  #pref {
+    display: inline-block;
+    font-size: 3vmin; font-weight: 700;
+    background: #c00; color: #fff;
+    border-radius: 1vmin; padding: 0.5vmin 3vmin;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+  #groupBadge {
+    display: none;
+    font-size: 2.2vmin; font-weight: 700;
+    background: #0a4d8c; color: #cfe8ff;
+    border-radius: 1vmin; padding: 0.5vmin 2vmin;
+    white-space: nowrap;
+  }
+  #footMetaWrap { display: flex; flex-direction: column; gap: 0.5vmin; min-width: 0; }
   #title.linkable { cursor: pointer; }
   #title.linkable:hover { text-decoration: underline; }
   #title.linkable:focus-visible { outline: 2px solid #2f6fd0; outline-offset: 0.4vmin; }
@@ -126,7 +130,7 @@
     color: #e8e8e8;
     word-break: break-word;
     display: -webkit-box;
-    -webkit-line-clamp: 6;
+    -webkit-line-clamp: 8;
     -webkit-box-orient: vertical;
     overflow: hidden;
   }
@@ -138,13 +142,12 @@
   }
   #related .rel-label { color: #6f9bd8; font-weight: 700; }
   #meta {
-    margin-top: 2.5vmin;
     font-size: 2.3vmin; color: #bbb;
   }
   #counter {
-    margin-top: 1vmin;
     font-size: 2vmin; color: #666;
   }
+  #footRow #meta, #footRow #counter { margin-top: 0; }
   #hint {
     margin-top: 1vmin;
     font-size: 1.9vmin; color: #555;
@@ -273,7 +276,7 @@
   body.light-modern #wxBox .wx-pop { color: #0090a8; }
   body.light-modern #wxBox .wx-temp { color: #b36b00; }
   body.light-modern #voiceWarn { background: #fff3cd; color: #856404; }
-  body.light-modern #pref { background: linear-gradient(135deg, #00b8c4, #00d68a); font-size: 4.4vmin; border-radius: 0.8vmin; transform: skewX(-10deg); box-shadow: 0 0.4vmin 1vmin rgba(0,180,170,0.35); }
+  body.light-modern #pref { background: linear-gradient(135deg, #00b8c4, #00d68a); font-size: 3.2vmin; border-radius: 0.8vmin; transform: skewX(-10deg); box-shadow: 0 0.4vmin 1vmin rgba(0,180,170,0.35); }
   body.light-modern #groupBadge { background: linear-gradient(135deg, #0090a8, #00bfa5); color: #fff; border-radius: 0.8vmin; transform: skewX(-10deg); box-shadow: 0 0.3vmin 0.8vmin rgba(0,150,160,0.3); }
   body.light-modern #title { background: #fff; color: #111; font-size: 4.6vmin; font-weight: 800; border-radius: 1.2vmin; border-left: 1.2vmin solid #00bfa5; padding: 1.5vmin 2.5vmin; box-shadow: 0 0.4vmin 1.2vmin rgba(0,0,0,0.1); }
   body.light-modern #photo { background: #fff; box-shadow: 0 0.4vmin 1.2vmin rgba(0,0,0,0.12); border-radius: 1.2vmin; }
@@ -320,13 +323,11 @@
 
 <div id="main">
   <div id="left">
-    <div id="prefRow"><span id="pref">待機中</span><span id="groupBadge"></span></div>
     <div id="title">ニュースを読み込んでいます…</div>
     <img id="photo" alt="" referrerpolicy="no-referrer" />
     <div id="body" class="empty"></div>
     <div id="related"></div>
-    <div id="meta"></div>
-    <div id="counter"></div>
+    <div id="footRow"><span id="pref">待機中</span><span id="groupBadge"></span><div id="footMetaWrap"><div id="meta"></div><div id="counter"></div></div></div>
     <div id="hint">→キー: 次の記事 / ←キー: 前の記事 / 右の一覧クリックでも移動できます / スペース: 一時停止・再開</div>
   </div>
   <div id="right">
@@ -344,7 +345,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.9.3</div>
+  <div id="ver">v.1.9.4</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
