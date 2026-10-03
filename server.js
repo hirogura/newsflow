@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.5';
+const VERSION = '2.4.6';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -750,6 +750,8 @@ function extractMainParagraphs(html) {
     // 埋め込みJS断片が残っていたらその段落は捨てる（本文は続く）
     if (/googletag|console\.(log|error|warn|info|debug)|document\.write/.test(t)) continue;
     if (isPromoParagraph(t)) continue;
+    // 写真キャプションは本文から外す（v2.4.6。朝日はRSSが空のため記事取得に頼る分、混入対策）
+    if (isCaptionParagraph(t)) continue;
     if (t.length < 20 || isJunkBody(t)) continue;
     // 本文末尾の関連・広告・有料壁の勧誘に入ったら打ち切る（本文段落のみ採用）
     if (isBoilerplateParagraph(t)) break;
@@ -1247,6 +1249,48 @@ function decodeJsonEscapes(s) {
 }
 
 /**
+ * 写真キャプションらしい段落か（本文から除外する）。
+ * 朝日の形式（「…ガードレール=2026年9月24日…、上田幸一撮影」）を想定。
+ * 「=」を含み「撮影/提供」で終わる短文のみ対象（本文の「…を撮影。」は「。」で終わるため残る）。
+ */
+function isCaptionParagraph(t) {
+  const s = String(t || '').trim();
+  if (!s || s.length > 200) return false;
+  return /[=＝]/.test(s) && /(撮影|提供)\s*$/.test(s);
+}
+
+/**
+ * 途中から始まる有料壁の勧誘テールを切り落とすマーカー。
+ * 旧キャッシュの連結済み本文用（新規抽出は段落先頭判定で打ち切るため対象外）。
+ * 本文に現れにくい勧誘固有の言い回しに限定する。
+ */
+const MIDTEXT_SOLICITATION_MARKERS = [
+  '登録すると続き',
+  'この記事は会員限定',
+  'すべての記事が読み放題',
+  '※無料期間中に',
+  '【この記事の続きが読める】',
+  '有料記事が読み放題',
+  '初回1カ月無料',
+  '企業での記事共有',
+  '有料会員になると',
+];
+
+/** 勧誘テールを切り落とす（無ければ原文） */
+function truncateSolicitationTail(s) {
+  const t = String(s == null ? '' : s);
+  if (!t) return t;
+  let cut = -1;
+  for (const m of MIDTEXT_SOLICITATION_MARKERS) {
+    if (!m) continue;
+    const i = t.indexOf(m);
+    if (i !== -1 && (cut === -1 || i < cut)) cut = i;
+  }
+  if (cut === -1) return t;
+  return t.slice(0, cut).replace(/[\s　…]+$/, '').trim();
+}
+
+/**
  * 本文テキストの残渣除去（v2.4.5）。
  * 旧バージョンでキャッシュされた「シェアボタン文言＋広告JS＋[PR]」付き本文や
  * RSS 由来の同様の混入を、表示・保存の各経路で修復するための集中処理。
@@ -1261,6 +1305,10 @@ function sanitizeBodyText(t) {
     prev = s;
     s = cleanShareLead(s);
   } while (s !== prev);
+  // 写真キャプションの残渣を除去（「=日時…撮影」で終わる空白なしスパン。本文は残す）
+  s = s.replace(/\S*[=＝]\S*?(撮影|提供)(?=\s|$)/g, ' ');
+  // 途中からの勧誘テールを切り落とす
+  s = truncateSolicitationTail(s);
   // 埋め込み広告JSのスパン除去（JSコード内に「。」は現れない前提。残渣のみを狙う）
   s = s.replace(/(console\.\w+|googletag|setTimeout\s*\()[^。]{0,1000}?\}\)\s*;?/g, ' ');
   // 広告マーカー除去
@@ -3012,6 +3060,8 @@ module.exports = {
   isArticleLikeUrl,
   cleanShareLead,
   isPromoParagraph,
+  isCaptionParagraph,
+  truncateSolicitationTail,
   scrapeSiteFeed,
   resolveFeedIndex,
   feedId,
