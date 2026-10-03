@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -537,12 +537,14 @@ const parser = new Parser({
   timeout: 15000,
   headers: { 'User-Agent': BROWSER_UA },
   // 写真抽出用: media:content / media:thumbnail を配列のまま保持する
+  // 全文取得用: content:encoded を保持する（v2.2.0・selfrss 参考）
   customFields: {
     feed: [],
     item: [
       ['media:content', 'media:content', { keepArray: true }],
       ['media:thumbnail', 'media:thumbnail', { keepArray: true }],
       'media:group',
+      'content:encoded',
     ],
   },
 });
@@ -552,13 +554,116 @@ function normalizeTitle(t) {
   return (t || '').trim().replace(/[ \t\u3000]+/g, ' ');
 }
 
+// ---------- 長文本文の取得（selfrss 参考: v2.2.0） ----------
+// RSS の短い snippet ではなく content:encoded 等の全文を優先し、
+// 記事ページも og:description（短い場合あり）より <p> 結合の全文を優先する。
+// いずれも「長い方を採用」することで、要約前の時点で文の途中切れを減らす。
+const RSS_BODY_MAX_CHARS = 3000;
+const ARTICLE_BODY_MAX_CHARS = 2000;
+
+/** HTML をプレーンテキスト化する（script/style 除去・タグ除去・実体参照復号） */
+function htmlToText(html) {
+  if (!html) return '';
+  let t = String(html);
+  t = t.replace(/<script[\s\S]*?<\/script>/gi, ' ');
+  t = t.replace(/<style[\s\S]*?<\/style>/gi, ' ');
+  t = t.replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+  t = t.replace(/<template[\s\S]*?<\/template>/gi, ' ');
+  t = t.replace(/<br\s*\/?>/gi, '\n');
+  t = t.replace(/<\/(p|div|h[1-6]|li|tr|blockquote|article|section)>/gi, '\n');
+  t = t.replace(/<[^>]+>/g, ' ');
+  t = decodeEntities(t);
+  t = t.replace(/[ \t\u3000\xa0]+/g, ' ');
+  t = t.replace(/\n\s*\n+/g, '\n');
+  return t.trim();
+}
+
+/** RSS アイテムのフィールド値を文字列化する（object/配列で来る場合に対応） */
+function rssFieldText(v) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v)) return v.map(rssFieldText).join('\n');
+  if (typeof v === 'object') {
+    if (typeof v._ === 'string') return v._;
+    if (typeof v.href === 'string') return v.href;
+    if (typeof v['#'] === 'string') return v['#'];
+    return '';
+  }
+  return String(v);
+}
+
+/**
+ * RSS アイテムから本文候補のうち最も長いものを返す（selfrss の全文優先流儀）。
+ * 候補: content:encoded / content / summary / description / contentSnippet。
+ * HTML はテキスト化して比較する。
+ */
+function extractRssBody(raw) {
+  if (!raw || typeof raw !== 'object') return '';
+  const fields = [
+    raw['content:encoded'],
+    raw.content,
+    raw.summary,
+    raw.description,
+    raw.contentSnippet,
+  ];
+  let best = '';
+  for (const f of fields) {
+    const s = rssFieldText(f);
+    if (!s) continue;
+    const text = /<[a-z][^>]*>/i.test(s)
+      ? htmlToText(s)
+      : decodeEntities(s).replace(/\s+/g, ' ').trim();
+    if (text.length > best.length) best = text;
+  }
+  return best.slice(0, RSS_BODY_MAX_CHARS);
+}
+
+/**
+ * 記事HTMLの主文エリアから <p> 段落を抜き出す。
+ * <article> があればその範囲を優先する（Readability の軽量代替）。
+ */
+function extractMainParagraphs(html) {
+  if (!html) return [];
+  let scope = String(html);
+  const artStart = scope.search(/<article[\s>]/i);
+  const artEnd = scope.search(/<\/article>/i);
+  if (artStart !== -1 && artEnd > artStart) {
+    scope = scope.slice(artStart, artEnd);
+  } else {
+    const mainStart = scope.search(/<main[\s>]/i);
+    const mainEnd = scope.search(/<\/main>/i);
+    if (mainStart !== -1 && mainEnd > mainStart) scope = scope.slice(mainStart, mainEnd);
+  }
+  const out = [];
+  for (const m of scope.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)) {
+    let t = m[1].replace(/<[^>]+>/g, ' ');
+    t = decodeEntities(t).replace(/\s+/g, ' ').trim();
+    if (t.length >= 20 && !isJunkBody(t)) out.push(t);
+    if (out.join('').length >= ARTICLE_BODY_MAX_CHARS) break;
+  }
+  return out;
+}
+
+/** 2つの本文候補のうち実質的に長い方を返す（「続きを読む」残渣を除いた長さで比較） */
+function pickLongerBody(a, b) {
+  const sa = String(a == null ? '' : a);
+  const sb = String(b == null ? '' : b);
+  if (!sa) return sb;
+  if (!sb) return sa;
+  const ea = stripReadMore(sa).trim().length;
+  const eb = stripReadMore(sb).trim().length;
+  return eb > ea ? sb : sa;
+}
+
 function normalizeItem(raw, sourceName) {
   const title = (raw.title || '').trim();
   if (!title) return null;
   const link = (raw.link || raw.guid || '').trim();
   const pubDate =
     raw.isoDate || raw.pubDate || (raw['dc:date'] || raw['dcterms:date'] || null);
-  let body = (raw.contentSnippet || raw.content || raw.summary || raw.description || '').toString();
+  // selfrss 参考: RSS の短い snippet より content:encoded 等の全文を優先する。
+  // 長い方を採用することで、要約前の時点で文の途中切れを減らす。
+  let body = extractRssBody(raw);
   // RSS 由来の本文に有料壁のゴミが混じる場合も破棄する（タイトルのみ読み上げ）
   body = cleanBodyWithLink(body, link);
   let ts = null;
@@ -1009,15 +1114,23 @@ function cleanBodyWithLink(text, link) {
 }
 
 /**
- * 記事HTMLから本文要約文を抽出する。優先度:
- * 1. og:description 2. meta[name=description] 3. JSON-LD NewsArticle の description 4. 長めの <p>
+ * 記事HTMLから本文を抽出する。優先度（selfrss 参考・v2.2.0で長文優先に変更）:
+ * 1. og:description / meta[name=description] / JSON-LD の description
+ * 2. 主文エリアの <p> 結合（最大 ARTICLE_BODY_MAX_CHARS 文字）
+ * → 候補のうち実質的に最も長いものを採用する（短い snippet の途中切れを避ける）。
+ * 読売の有料壁ページは従来どおり ''（タイトルのみ読み上げ）。
  */
-function extractArticleDescription(html) {
+function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS) {
   if (!html) return '';
+  // 読売の有料壁ページ（本文の代わりにナビ・購読案内等しか無い）は <p> 拾い自体を行わない
+  const isYomiuriPaywallPage =
+    html.includes('YolConsts') || html.includes('LOCAL_STORAGE_OPTION_WEATHER_AREA');
+  if (isYomiuriPaywallPage) return '';
+  const cands = [];
   const og = extractMetaContent(html, 'property', 'og:description');
-  if (og && og.length >= 10 && !isJunkBody(og)) return og;
+  if (og && og.length >= 10 && !isJunkBody(og)) cands.push(og.trim());
   const meta = extractMetaContent(html, 'name', 'description');
-  if (meta && meta.length >= 10 && !isJunkBody(meta)) return meta;
+  if (meta && meta.length >= 10 && !isJunkBody(meta)) cands.push(meta.trim());
   const ldMatch = html.match(
     /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
   );
@@ -1027,22 +1140,33 @@ function extractArticleDescription(html) {
       const dm = inner.match(/"description"\s*:\s*"((?:\\.|[^"\\])*)"/);
       if (dm && dm[1]) {
         const desc = decodeEntities(dm[1].replace(/\\n/g, ' ').replace(/\\"/g, '"')).trim();
-        if (desc.length >= 10 && !isJunkBody(desc)) return desc;
+        if (desc.length >= 10 && !isJunkBody(desc)) cands.push(desc);
       }
     }
   }
-  // フォールバック: 30文字以上の <p> の先頭（ゴミ段落は除外する）。
-  // ただし読売の有料壁ページ（本文の代わりにナビ・購読案内・関連リンク・広告しか無い）は
-  // <p> 拾い自体を行わない（どの <p> を拾ってもゴミになるためタイトルのみにする）。
-  // 無料記事は og:description 等で先に return 済みのため影響しない。
-  const isYomiuriPaywallPage =
-    html.includes('YolConsts') || html.includes('LOCAL_STORAGE_OPTION_WEATHER_AREA');
-  if (isYomiuriPaywallPage) return '';
-  const ps = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
-    .map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter((t) => t.length >= 30 && !isJunkBody(t));
-  if (ps.length > 0) return decodeEntities(ps[0]).slice(0, 500);
-  return '';
+  // 主文エリアの <p> を結合した全文候補（従来は先頭1段落×500字だったものを拡張）
+  const paras = extractMainParagraphs(html);
+  if (paras.length > 0) {
+    let joined = '';
+    for (const p of paras) {
+      joined += (joined && !/[。！？!?」』]$/.test(joined) ? ' ' : '') + p;
+      if (joined.length >= maxChars) break;
+    }
+    joined = decodeEntities(joined).slice(0, maxChars).trim();
+    if (joined.length >= 10 && !isJunkBody(joined)) cands.push(joined);
+  }
+  if (cands.length === 0) return '';
+  // 最も長い候補を採用（「続きを読む」残渣を除いた実質長で比較）
+  let best = cands[0];
+  let bestLen = stripReadMore(best).trim().length;
+  for (const c of cands.slice(1)) {
+    const len = stripReadMore(c).trim().length;
+    if (len > bestLen) {
+      best = c;
+      bestLen = len;
+    }
+  }
+  return best;
 }
 
 /** 記事HTMLから og:image（無ければ twitter:image）を抜き出す */
@@ -1079,6 +1203,9 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
     let body = extractArticleDescription(html);
     // 有料壁などでナビ・JSが混入したゴミ本文は破棄し、タイトルのみ読み上げにする
     body = cleanBodyWithLink(body, url);
+    // キャッシュ済みの本文より今回の方が長ければ長い方を残す（短い snippet で上書きしない）
+    const cached = bodyCache.get(url) || '';
+    if (cached) body = pickLongerBody(cached, body);
     const image = extractOgImage(html);
     bodyCache.set(url, body);
     imageCache.set(url, image);
@@ -1107,7 +1234,11 @@ async function fetchArticleBody(url, timeoutMs = 10000) {
 
 /** body・image 未取得の記事に本文・写真を付与する（並列数制限・上限付き・ベストエフォート） */
 async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
-  const targets = items.filter((it) => it.link && (!it.body || !it.image)).slice(0, limit);
+  // 本文が短い（RSS の snippet 程度）場合も記事ページで長い本文を試す（selfrss 流儀の長い方優先）
+  const SHORT_BODY_CHARS = 150;
+  const targets = items
+    .filter((it) => it.link && (!it.body || it.body.length < SHORT_BODY_CHARS || !it.image))
+    .slice(0, limit);
   let i = 0;
   async function worker() {
     while (i < targets.length) {
@@ -1115,12 +1246,12 @@ async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
       // 両方キャッシュ済みなら取得不要（store 反映のみ）
       let body = it.body || '';
       let image = it.image || '';
-      if (!body || !image) {
+      if (!body || body.length < SHORT_BODY_CHARS || !image) {
         const page = await fetchArticlePage(it.link);
-        if (!body && page.body) body = page.body;
+        if (page.body) body = pickLongerBody(body, cleanBodyWithLink(page.body, it.link));
         if (!image && page.image) image = page.image;
       }
-      if (body && !it.body) {
+      if (body && body !== it.body) {
         it.body = body;
         it.summary = summarizeText(body);
         bodyCache.set(it.link, body);
@@ -1129,13 +1260,16 @@ async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
         if (!it.image) it.image = image;
         imageCache.set(it.link, image);
       }
-      // store 側の同一 link にも反映
+      // store 側の同一 link にも反映（長い方を残す）
       for (const [, list] of store) {
         for (const e of list) {
           if (e.link === it.link) {
-            if (body && !e.body) {
-              e.body = body;
-              e.summary = it.summary || summarizeText(body);
+            if (body) {
+              const merged = pickLongerBody(e.body, body);
+              if (merged !== e.body) {
+                e.body = merged;
+                e.summary = summarizeText(merged);
+              }
             }
             if (image && !e.image) e.image = image;
           }
@@ -1308,13 +1442,23 @@ function ingestFeedItems(feed, items, fetchedAt) {
         (e) => normalizeTitle(e.title) === normT || (n.link && e.link === n.link && n.link !== '')
       );
       if (dup) {
-        // 既存記事に写真が無く、今回の取得にあれば補完する
+        // 既存記事に写真・本文が無く、今回の取得にあれば補完する（本文は長い方を残す）
         if (!dup.image && n.image) {
           dup.image = n.image;
           if (dup.link) imageCache.set(dup.link, n.image);
         }
+        if (n.body && dup.link) {
+          const merged = pickLongerBody(dup.body, cleanBodyWithLink(n.body, dup.link));
+          if (merged !== dup.body) {
+            dup.body = merged;
+            dup.summary = summarizeText(merged);
+          }
+        }
         continue;
       }
+      // RSS 時点の本文（content:encoded 等の全文優先）を保持する。
+      // 記事ページの追いかけ取得でさらに長い本文が取れれば fillMissingBodies が上書きする。
+      const initBody = cleanBodyWithLink(n.body, n.link);
       list.unshift({
         prefecture: pref,
         title: n.title,
@@ -1323,11 +1467,18 @@ function ingestFeedItems(feed, items, fetchedAt) {
         feedId: feedId(feed.url),
         pubDate: n.pubDate,
         fetchedAt,
-        body: '',
-        summary: '',
+        body: initBody,
+        summary: initBody ? summarizeText(initBody) : '',
         image: n.image || '',
       });
       if (n.image && n.link) imageCache.set(n.link, n.image);
+      if (initBody && n.link) {
+        bodyCache.set(n.link, initBody);
+        if (bodyCache.size > 1000) {
+          const first = bodyCache.keys().next().value;
+          bodyCache.delete(first);
+        }
+      }
       // pubDate 新しい順に並べ替え（pubDateなしは後ろ）→ 最新10件に trims
       list.sort((a, b) => {
         if (a.pubDate && b.pubDate) return b.pubDate.localeCompare(a.pubDate);
@@ -2430,6 +2581,13 @@ module.exports = {
   decodeEntities,
   extractMetaContent,
   extractArticleDescription,
+  extractRssBody,
+  extractMainParagraphs,
+  htmlToText,
+  rssFieldText,
+  pickLongerBody,
+  RSS_BODY_MAX_CHARS,
+  ARTICLE_BODY_MAX_CHARS,
   isJunkBody,
   cleanBodyText,
   isYomiuriPaywallResidue,
