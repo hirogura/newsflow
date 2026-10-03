@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.2';
+const VERSION = '2.4.3';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1141,9 +1141,39 @@ function isJunkBody(text) {
   return false;
 }
 
+/**
+ * JSON 文字列由来のエスケープ残渣（\uXXXX・\n・\" 等）を復号する。
+ * livedoor の JSON-LD は description 全体が \u エスケープされており、
+ * 従来の処理では「3\u65e5\u672a\u660e…」のような文字化けが本文に残った（v2.4.3）。
+ * 既にキャッシュ済みの化け本文の修復にも使う。
+ */
+function decodeJsonEscapes(s) {
+  let t = String(s == null ? '' : s);
+  if (!t.includes('\\')) return t;
+  // 先に JSON の「\\」（文字としてのバックスラッシュ）を退避し、残りの \X を復号してから戻す
+  const BS = '\uE000';
+  t = t.split('\\\\').join(BS);
+  t = t.replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => {
+    try {
+      return String.fromCodePoint(parseInt(h, 16));
+    } catch {
+      return '';
+    }
+  });
+  t = t
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\t/g, ' ')
+    .replace(/\\"/g, '"')
+    .replace(/\\'/g, "'")
+    .replace(/\\\//g, '/');
+  return t.split(BS).join('\\');
+}
+
 /** ゴミ本文なら ''、そうでなければ原文を返す */
 function cleanBodyText(text) {
-  const s = String(text == null ? '' : text);
+  const s = decodeJsonEscapes(text);
+  if (!s) return s;
   return isJunkBody(s) ? '' : s;
 }
 
@@ -1162,11 +1192,26 @@ function isYomiuriPaywallResidue(link, body) {
 
 /** ゴミ本文・有料壁残渣なら ''、そうでなければ原文を返す（link 付き版） */
 function cleanBodyWithLink(text, link) {
-  const s = String(text == null ? '' : text);
+  const s = decodeJsonEscapes(text);
   if (!s) return s;
   if (isJunkBody(s)) return '';
   if (isYomiuriPaywallResidue(link, s)) return '';
   return s;
+}
+
+/**
+ * 先頭のパンくず残渣（「ニューストップ > 国内ニュース > 社会ニュース > 」等）を除去する。
+ * livedoor の JSON-LD description 先頭に付くサイト内ナビ由来の断片対策（v2.4.3）。
+ * 数字を含む比較表現（「5 > 3」等）は本文の可能性があるため残す。
+ */
+function stripBreadcrumbPrefix(s) {
+  const t = String(s == null ? '' : s);
+  if (!t) return t;
+  const m = t.match(/^((?:[^>。！？\n＞]{1,24}\s*[>＞›»]\s*)+)/);
+  if (!m) return t;
+  const segs = m[1].split(/ *[>＞›»] */).filter((g) => g.trim() !== '');
+  if (segs.length === 0 || segs.some((g) => /[0-9０-９]/.test(g))) return t;
+  return t.slice(m[1].length).replace(/^\s+/, '');
 }
 
 /**
@@ -1194,7 +1239,14 @@ function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS, link
       const inner = tag.replace(/^<script[^>]*>/i, '').replace(/<\/script>\s*$/i, '');
       const dm = inner.match(/"description"\s*:\s*"((?:\\.|[^"\\])*)"/);
       if (dm && dm[1]) {
-        const desc = decodeEntities(dm[1].replace(/\\n/g, ' ').replace(/\\"/g, '"')).trim();
+        // JSON 文字列のエスケープ（\uXXXX 等。livedoor は全面エスケープ）を復号する（v2.4.3）
+        let desc = '';
+        try {
+          desc = JSON.parse('"' + dm[1] + '"');
+        } catch {
+          desc = decodeJsonEscapes(dm[1]);
+        }
+        desc = decodeEntities(String(desc).replace(/\s+/g, ' ')).trim();
         if (desc.length >= 10 && !isJunkBody(desc)) cands.push(desc);
       }
     }
@@ -1235,7 +1287,7 @@ function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS, link
       bestLen = len;
     }
   }
-  return best;
+  return stripBreadcrumbPrefix(best);
 }
 
 /** 記事HTMLから og:image（無ければ twitter:image）を抜き出す */
@@ -2841,6 +2893,8 @@ module.exports = {
   ARTICLE_BODY_MAX_CHARS,
   isJunkBody,
   cleanBodyText,
+  decodeJsonEscapes,
+  stripBreadcrumbPrefix,
   isYomiuriPaywallResidue,
   cleanBodyWithLink,
   fetchArticleBody,
