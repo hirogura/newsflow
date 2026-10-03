@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.2.0';
+const VERSION = '2.3.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -621,7 +621,26 @@ function extractRssBody(raw) {
 /**
  * 記事HTMLの主文エリアから <p> 段落を抜き出す。
  * <article> があればその範囲を優先する（Readability の軽量代替）。
+ * 関連見出し・広告欄の段落まで混ざらないよう、定型の区切り文言で打ち切る。
  */
+const PARAGRAPH_STOP_PREFIXES = [
+  'あわせて読みたい',
+  '関連記事',
+  'おすすめ記事',
+  '[Copyright',
+  'Copyright',
+];
+function isBoilerplateParagraph(t) {
+  const s = String(t || '').trim();
+  if (!s) return true;
+  for (const p of PARAGRAPH_STOP_PREFIXES) {
+    if (p && s.startsWith(p)) return true;
+  }
+  // 検索誘導・詳細リンクの定型行（本文中に現れることはほぼ無い）
+  if (s.includes('読売新聞を検索でお気に入り')) return true;
+  if (s.length < 80 && s.includes('詳しくはこちら')) return true;
+  return false;
+}
 function extractMainParagraphs(html) {
   if (!html) return [];
   let scope = String(html);
@@ -638,7 +657,10 @@ function extractMainParagraphs(html) {
   for (const m of scope.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)) {
     let t = m[1].replace(/<[^>]+>/g, ' ');
     t = decodeEntities(t).replace(/\s+/g, ' ').trim();
-    if (t.length >= 20 && !isJunkBody(t)) out.push(t);
+    if (t.length < 20 || isJunkBody(t)) continue;
+    // 本文末尾の関連・広告欄に入ったら打ち切る（本文段落のみ採用）
+    if (isBoilerplateParagraph(t)) break;
+    out.push(t);
     if (out.join('').length >= ARTICLE_BODY_MAX_CHARS) break;
   }
   return out;
@@ -1118,14 +1140,13 @@ function cleanBodyWithLink(text, link) {
  * 1. og:description / meta[name=description] / JSON-LD の description
  * 2. 主文エリアの <p> 結合（最大 ARTICLE_BODY_MAX_CHARS 文字）
  * → 候補のうち実質的に最も長いものを採用する（短い snippet の途中切れを避ける）。
- * 読売の有料壁ページは従来どおり ''（タイトルのみ読み上げ）。
+ * 読売は無料記事（og が「【読売新聞】」始まり）のみ <p> も採用し、
+ * 有料壁ページは従来どおり '' 相当（タイトルのみ読み上げ）にする。
+ * ※ v2.3.0: 無料記事にも含まれる YolConsts 等のページ内定数だけで
+ *    有料壁と判定していたため、無料記事まで '' になっていたのを修正。
  */
-function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS) {
+function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS, link = '') {
   if (!html) return '';
-  // 読売の有料壁ページ（本文の代わりにナビ・購読案内等しか無い）は <p> 拾い自体を行わない
-  const isYomiuriPaywallPage =
-    html.includes('YolConsts') || html.includes('LOCAL_STORAGE_OPTION_WEATHER_AREA');
-  if (isYomiuriPaywallPage) return '';
   const cands = [];
   const og = extractMetaContent(html, 'property', 'og:description');
   if (og && og.length >= 10 && !isJunkBody(og)) cands.push(og.trim());
@@ -1144,16 +1165,30 @@ function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS) {
       }
     }
   }
-  // 主文エリアの <p> を結合した全文候補（従来は先頭1段落×500字だったものを拡張）
-  const paras = extractMainParagraphs(html);
-  if (paras.length > 0) {
-    let joined = '';
-    for (const p of paras) {
-      joined += (joined && !/[。！？!?」』]$/.test(joined) ? ' ' : '') + p;
-      if (joined.length >= maxChars) break;
+  // 読売の無料記事は og が「【読売新聞】」始まりで統一されている。
+  // 有料壁ページ（本文の代わりにナビ・購読案内等しか無い）は <p> 拾い自体を行わない。
+  // ページ内定数（YolConsts 等）は無料記事にも含まれるため判定には使わない。
+  const isYomiuri = /yomiuri\.co\.jp/i.test(String(link || ''));
+  const yomiuriFree = cands.some((c) => c.replace(/^\s+/, '').startsWith('【読売新聞】'));
+  if (!(isYomiuri && !yomiuriFree)) {
+    // 主文エリアの <p> を結合した全文候補（従来は先頭1段落×500字だったものを拡張）
+    const paras = extractMainParagraphs(html);
+    if (paras.length > 0) {
+      let joined = '';
+      for (const p of paras) {
+        joined += (joined && !/[。！？!?」』]$/.test(joined) ? ' ' : '') + p;
+        if (joined.length >= maxChars) break;
+      }
+      joined = decodeEntities(joined).slice(0, maxChars).trim();
+      if (joined.length >= 10 && !isJunkBody(joined)) {
+        // 読売の無料記事の <p> 本文には接頭辞が付かないため補う。
+        // 下流の有料壁残渣判定（接頭辞の有無）はそのまま活きる。
+        if (isYomiuri && yomiuriFree && !joined.replace(/^\s+/, '').startsWith('【読売新聞】')) {
+          joined = `【読売新聞】${joined}`;
+        }
+        cands.push(joined);
+      }
     }
-    joined = decodeEntities(joined).slice(0, maxChars).trim();
-    if (joined.length >= 10 && !isJunkBody(joined)) cands.push(joined);
   }
   if (cands.length === 0) return '';
   // 最も長い候補を採用（「続きを読む」残渣を除いた実質長で比較）
@@ -1200,7 +1235,7 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
       return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
     }
     const html = await res.text();
-    let body = extractArticleDescription(html);
+    let body = extractArticleDescription(html, ARTICLE_BODY_MAX_CHARS, url);
     // 有料壁などでナビ・JSが混入したゴミ本文は破棄し、タイトルのみ読み上げにする
     body = cleanBodyWithLink(body, url);
     // キャッシュ済みの本文より今回の方が長ければ長い方を残す（短い snippet で上書きしない）
@@ -2583,6 +2618,7 @@ module.exports = {
   extractArticleDescription,
   extractRssBody,
   extractMainParagraphs,
+  isBoilerplateParagraph,
   htmlToText,
   rssFieldText,
   pickLongerBody,
