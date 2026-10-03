@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.3.1';
+const VERSION = '2.4.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -490,12 +490,24 @@ const bodyCache = new Map();
 // 記事写真キャッシュ: url -> imageUrl（og:image 等。store と二重保持）
 const imageCache = new Map();
 
+// フィード種別: 'rss'（既定・RSS/Atom/RDF）/ 'site'（RSS非配信サイトのトップページ等）
+// 旧データ（kind 無し）は 'rss' 扱いにする（後方互換）
+function feedKind(feed) {
+  return feed && feed.kind === 'site' ? 'site' : 'rss';
+}
+
+/** フィード種別を正規化する（'site' 以外はすべて 'rss'） */
+function normalizeFeedKind(v) {
+  return v === 'site' ? 'site' : 'rss';
+}
+
 // フィード状態（/api/news の sources[]・/api/feeds の feeds[] として返却）
 function freshFeedState(f) {
   return {
     id: feedId(f.url),
     name: f.name,
     url: f.url,
+    kind: feedKind(f),
     enabled: f.enabled !== false,
     ok: false,
     items: 0,
@@ -1236,6 +1248,142 @@ function extractOgImage(html) {
   return '';
 }
 
+// ---------- Webサイト直接登録（RSS非配信サイト対応・v2.4.0） ----------
+// RSS の無いニュースサイトのトップページ等から記事リンクを抽出し、
+// RSS アイテム相当（{ title, link }）として既存パイプラインに流す。
+// 本文・写真は fillMissingBodies が記事ページから追いかけ取得する。
+const SITE_MAX_LINKS = 50; // 1サイトあたりの記事候補上限
+const SITE_MIN_TITLE_CHARS = 8; // アンカーテキストの最小文字数（ナビ文言の除外用）
+const SITE_HTML_MAX_BYTES = 2 * 1024 * 1024; // 解析対象HTMLの上限（巨大ページ対策）
+const SITE_STATIC_EXT = /\.(jpe?g|png|gif|webp|avif|svg|ico|css|js|mjs|pdf|mp4|webm|mp3|wav|zip|rar|xml|rss|rdf|atom|json)(\?.*)?$/i;
+
+/** アンカーテキストを記事タイトル用に整形する（タグ除去・空白圧縮・上限200字） */
+function cleanAnchorText(t) {
+  if (!t) return '';
+  let s = String(t).replace(/<[^>]+>/g, ' ');
+  s = decodeEntities(s).replace(/\s+/g, ' ').trim();
+  return s.slice(0, 200);
+}
+
+/**
+ * 記事リンクらしいURLかを判定する（純粋関数）。
+ * - 同一ホストのみ（外部リンク・SNS共有等を除外）
+ * - 静的ファイル・ページ内アンカー・特殊スキームを除外
+ * - パス深さ2段以上、または数字を含むID状パス（1段CMS対応）
+ */
+function isArticleLikeUrl(u, base) {
+  let baseHost = '';
+  try {
+    baseHost = new URL(String(base || '')).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (!u || typeof u.href !== 'string') return false;
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (u.hostname.toLowerCase() !== baseHost) return false;
+  if (SITE_STATIC_EXT.test(u.pathname)) return false;
+  const segs = u.pathname.split('/').filter(Boolean);
+  if (segs.length === 0) return false; // トップページ自身
+  if (segs.length < 2 && !/\d{4,}/.test(u.pathname)) return false;
+  // 登録元ページ自身へのリンクは除外する
+  try {
+    const b = new URL(String(base));
+    b.hash = '';
+    const c = new URL(u.href);
+    c.hash = '';
+    if (c.href === b.href) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * サイトHTMLから記事候補 {title, link} を抽出する（純粋関数・出現順・URL重複排除）。
+ * タイトルはアンカーテキスト（短すぎるものは除外）。最大 maxLinks 件。
+ */
+function extractSiteLinks(html, baseUrl, maxLinks = SITE_MAX_LINKS) {
+  const out = [];
+  const seen = new Set();
+  if (!html || !baseUrl) return out;
+  const scope = String(html).slice(0, SITE_HTML_MAX_BYTES);
+  const re = /<a\b[^>]*?\bhref\s*=\s*(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(scope)) !== null) {
+    if (out.length >= maxLinks) break;
+    const rawHref = (m[2] || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) continue;
+    const lower = rawHref.toLowerCase();
+    if (
+      lower.startsWith('javascript:') ||
+      lower.startsWith('mailto:') ||
+      lower.startsWith('tel:') ||
+      lower.startsWith('data:')
+    ) {
+      continue;
+    }
+    let u;
+    try {
+      u = new URL(rawHref, baseUrl);
+    } catch {
+      continue;
+    }
+    u.hash = '';
+    if (!isArticleLikeUrl(u, baseUrl)) continue;
+    const key = u.href;
+    if (seen.has(key)) continue;
+    const title = cleanAnchorText(m[3]);
+    if (title.length < SITE_MIN_TITLE_CHARS) continue;
+    seen.add(key);
+    out.push({ title, link: key });
+  }
+  return out;
+}
+
+/** サイトHTMLを1件取得する（HTML以外・巨大ページは拒否） */
+async function fetchSiteHtml(url, timeoutMs = 15000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      signal: ctl.signal,
+      headers: { 'User-Agent': BROWSER_UA, Accept: 'text/html,*/*' },
+      redirect: 'follow',
+    });
+    if (!res.ok) throw new Error('site HTTP ' + res.status);
+    const ctype = (res.headers.get('content-type') || '').toLowerCase();
+    if (ctype && !/html/.test(ctype) && !/text/.test(ctype)) {
+      throw new Error('HTMLではありません (' + ctype.split(';')[0] + ')');
+    }
+    const text = await res.text();
+    return text.slice(0, SITE_HTML_MAX_BYTES);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Webサイト1件分を取得してRSSアイテム相当の配列を返す。
+ * 戻り値は [{ title, link }]（pubDate 無し。fetchedAt でソートされる）。
+ */
+async function scrapeSiteFeed(feed, timeoutMs = 15000) {
+  if (!feed || !feed.url) throw new Error('URLが指定されていません');
+  const html = await fetchSiteHtml(feed.url, timeoutMs);
+  return extractSiteLinks(html, feed.url);
+}
+
+/**
+ * 1フィード分の取得（RSS/サイトの分岐。fetchAllFeeds と個別refreshで共用）。
+ * 戻り値は RSS アイテム相当の配列。
+ */
+async function fetchSingleFeed(feed) {
+  if (feedKind(feed) === 'site') {
+    return scrapeSiteFeed(feed);
+  }
+  const parsed = await parser.parseURL(feed.url);
+  return (parsed && parsed.items) || [];
+}
+
 /**
  * 記事ページを1回取得して本文と写真URLを返す（og:image 優先）。
  * 本文が十分長いキャッシュはそのまま返す。短い本文しか無い場合は
@@ -1446,6 +1594,7 @@ function loadFeeds() {
       .map((f) => ({
         name: (f.name || f.url).toString().slice(0, 100),
         url: f.url.trim(),
+        kind: normalizeFeedKind(f.kind),
         enabled: f.enabled !== false,
       }));
     if (cleaned.length === 0) return;
@@ -1472,6 +1621,7 @@ function saveFeeds() {
             id: feedId(f.url),
             name: f.name,
             url: f.url,
+            kind: feedKind(f),
             enabled: f.enabled !== false,
           })),
         },
@@ -1572,7 +1722,7 @@ async function fetchAllFeeds() {
     if (feed.enabled !== false) targets.push({ feed, index: i });
   });
   const results = await Promise.allSettled(
-    targets.map(({ feed }) => parser.parseURL(feed.url))
+    targets.map(({ feed }) => fetchSingleFeed(feed))
   );
 
   let ok = 0;
@@ -1584,13 +1734,14 @@ async function fetchAllFeeds() {
   results.forEach((r, k) => {
     const { feed, index } = targets[k];
     if (r.status === 'fulfilled') {
-      const items = (r.value && r.value.items) || [];
+      const items = r.value || [];
       ok++;
       itemCount += items.length;
       nextStates[index] = {
         id: feedId(feed.url),
         name: feed.name,
         url: feed.url,
+        kind: feedKind(feed),
         enabled: true,
         ok: true,
         items: items.length,
@@ -1606,6 +1757,7 @@ async function fetchAllFeeds() {
         id: feedId(feed.url),
         name: feed.name,
         url: feed.url,
+        kind: feedKind(feed),
         enabled: true,
         ok: false,
         items: 0,
@@ -2285,6 +2437,7 @@ app.get('/api/feeds/export', (req, res) => {
       id: feedId(f.url),
       name: f.name,
       url: f.url,
+      kind: feedKind(f),
       enabled: f.enabled !== false,
     })),
   });
@@ -2295,6 +2448,7 @@ function cleanFeedEntry(f) {
   return {
     name: ((f.name || f.url).toString().slice(0, 100)),
     url: f.url.trim(),
+    kind: normalizeFeedKind(f.kind),
     enabled: f.enabled !== false,
   };
 }
@@ -2411,7 +2565,12 @@ app.post('/api/feeds', (req, res) => {
   if (FEEDS.some((f) => normalizeFeedUrl(f.url) === normUrl)) {
     return res.status(409).json({ ok: false, error: 'その URL は既に登録されています' });
   }
-  const entry = { name: (name || url).slice(0, 100), url, enabled: true };
+  const entry = {
+    name: (name || url).slice(0, 100),
+    url,
+    kind: normalizeFeedKind(req.body && req.body.kind),
+    enabled: true,
+  };
   FEEDS.push(entry);
   feedStates.push(freshFeedState(entry));
   saveFeeds();
@@ -2460,11 +2619,15 @@ app.put('/api/feeds/:id', (req, res) => {
     }
     feed.name = name;
   }
+  if (body.kind !== undefined) {
+    feed.kind = normalizeFeedKind(body.kind);
+  }
   saveFeeds();
   const next = {
     id: feedId(feed.url),
     name: feed.name,
     url: feed.url,
+    kind: feedKind(feed),
     enabled: feed.enabled !== false,
     ok: !!prev.ok,
     items: prev.items || 0,
@@ -2536,14 +2699,14 @@ app.post('/api/feeds/:id/refresh', async (req, res) => {
     return res.status(400).json({ ok: false, error: '無効なフィードです' });
   }
   try {
-    const parsed = await parser.parseURL(feed.url);
-    const items = (parsed && parsed.items) || [];
+    const items = await fetchSingleFeed(feed);
     const fetchedAt = new Date().toISOString();
     const added = ingestFeedItems(feed, items, fetchedAt);
     feedStates[idx] = {
       id: feedId(feed.url),
       name: feed.name,
       url: feed.url,
+      kind: feedKind(feed),
       enabled: true,
       ok: true,
       items: items.length,
@@ -2564,6 +2727,7 @@ app.post('/api/feeds/:id/refresh', async (req, res) => {
       id: feedId(feed.url),
       name: feed.name,
       url: feed.url,
+      kind: feedKind(feed),
       enabled: true,
       ok: false,
       items: 0,
@@ -2675,6 +2839,13 @@ module.exports = {
   extractFeedImage,
   extractOgImage,
   ingestFeedItems,
+  fetchSingleFeed,
+  feedKind,
+  normalizeFeedKind,
+  extractSiteLinks,
+  cleanAnchorText,
+  isArticleLikeUrl,
+  scrapeSiteFeed,
   resolveFeedIndex,
   feedId,
   articleId,
