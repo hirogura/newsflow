@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.3.0';
+const VERSION = '2.3.1';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -560,6 +560,28 @@ function normalizeTitle(t) {
 // いずれも「長い方を採用」することで、要約前の時点で文の途中切れを減らす。
 const RSS_BODY_MAX_CHARS = 3000;
 const ARTICLE_BODY_MAX_CHARS = 2000;
+// 短い本文のしきい値（この文字数未満は「短い」とみなし、記事ページで長い本文を試す）
+const SHORT_BODY_CHARS = 150;
+// 短い本文の再取得はこの間隔を空ける（有料壁ページ等の叩きすぎ防止）
+const BODY_REFETCH_MIN_MS = 6 * 3600 * 1000;
+const bodyAttemptAt = new Map(); // url -> 最後に記事ページ取得を試みた時刻(ms)
+
+/** 短文キャッシュの再取得が可能か（前回試行から十分間隔が空いたか） */
+function shouldRefetchBody(url) {
+  const t = bodyAttemptAt.get(url);
+  if (!t) return true;
+  return Date.now() - t >= BODY_REFETCH_MIN_MS;
+}
+
+/** 記事ページ取得の試行を記録する（成功・失敗・キャッシュ返却を問わず試行時に呼ぶ） */
+function markBodyAttempt(url) {
+  if (!url) return;
+  bodyAttemptAt.set(url, Date.now());
+  if (bodyAttemptAt.size > 2000) {
+    const first = bodyAttemptAt.keys().next().value;
+    bodyAttemptAt.delete(first);
+  }
+}
 
 /** HTML をプレーンテキスト化する（script/style 除去・タグ除去・実体参照復号） */
 function htmlToText(html) {
@@ -1216,13 +1238,21 @@ function extractOgImage(html) {
 
 /**
  * 記事ページを1回取得して本文と写真URLを返す（og:image 優先）。
- * キャッシュ済みの片方だけが無い場合も再取得せず、ある分だけ返す。
+ * 本文が十分長いキャッシュはそのまま返す。短い本文しか無い場合は
+ * 間隔を空けて再取得し、長い方が取れればそちらに置き換える
+ * （v2.3.1: 短い og スニペットだけが残り続ける問題の修正。
+ *  読売RSSは description が空のため、再取得なしでは全文に届かない）。
  */
 async function fetchArticlePage(url, timeoutMs = 10000) {
   if (!url || !/^https?:\/\//.test(url)) return { body: '', image: '' };
   if (bodyCache.has(url) && imageCache.has(url)) {
-    return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
+    const cachedBody = bodyCache.get(url) || '';
+    // 長文キャッシュはそのまま返す。短文は再取得 interval 経過後のみ再試行する
+    if (cachedBody.length >= SHORT_BODY_CHARS || !shouldRefetchBody(url)) {
+      return { body: cachedBody, image: imageCache.get(url) || '' };
+    }
   }
+  markBodyAttempt(url);
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
@@ -1262,17 +1292,22 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
 
 async function fetchArticleBody(url, timeoutMs = 10000) {
   if (!url || !/^https?:\/\//.test(url)) return '';
-  if (bodyCache.has(url)) return bodyCache.get(url) || '';
+  // 短文キャッシュの再取得制御は fetchArticlePage 側に一任する（v2.3.1）
   const { body } = await fetchArticlePage(url, timeoutMs);
   return body;
 }
 
 /** body・image 未取得の記事に本文・写真を付与する（並列数制限・上限付き・ベストエフォート） */
-async function fillMissingBodies(items, { concurrency = 5, limit = 60 } = {}) {
-  // 本文が短い（RSS の snippet 程度）場合も記事ページで長い本文を試す（selfrss 流儀の長い方優先）
-  const SHORT_BODY_CHARS = 150;
+async function fillMissingBodies(items, { concurrency = 5, limit = 120 } = {}) {
+  // 本文が短い（RSS の snippet 程度）場合も記事ページで長い本文を試す（selfrss 流儀の長い方優先）。
+  // 読売RSSは description が空のため本文空の記事が多く、空・短い順に優先して埋める。
   const targets = items
     .filter((it) => it.link && (!it.body || it.body.length < SHORT_BODY_CHARS || !it.image))
+    .sort(
+      (a, b) =>
+        (a.body || '').length - (b.body || '').length ||
+        (b.fetchedAt || '').localeCompare(a.fetchedAt || '')
+    )
     .slice(0, limit);
   let i = 0;
   async function worker() {
@@ -2449,17 +2484,21 @@ app.get('/api/article', async (req, res) => {
   if (!url || !/^https?:\/\//.test(url)) {
     return res.status(400).json({ ok: false, error: 'url パラメータが必要です' });
   }
-  // store に本文があればそれを返す（ゴミ本文はタイトルのみ扱いにする）
+  // store に本文があればそれを返す（ゴミ本文はタイトルのみ扱いにする）。
+  // ただし短い本文しか無い場合はライブ再取得に回す（v2.3.1: 短文キャッシュに張り付かない）
   for (const [, list] of store) {
     const hit = list.find((e) => e.link === url && (e.body || e.summary));
     if (hit) {
       const image = hit.image || imageCache.get(url) || '';
       const body = cleanBodyWithLink(hit.body, url);
       const summary = cleanBodyWithLink(hit.summary, url) || summarizeText(body);
-      if (!body && !summary) {
-        return res.json({ ok: true, url, body: '', summary: '', image, cached: true });
+      if (body.length >= SHORT_BODY_CHARS || !shouldRefetchBody(url)) {
+        if (!body && !summary) {
+          return res.json({ ok: true, url, body: '', summary: '', image, cached: true });
+        }
+        return res.json({ ok: true, url, body, summary, image, cached: true });
       }
-      return res.json({ ok: true, url, body, summary, image, cached: true });
+      // 短文かつ再取得 interval 経過 → 下のライブ取得にフォールスルーする
     }
   }
   const { body, image } = await fetchArticlePage(url);
@@ -2630,6 +2669,9 @@ module.exports = {
   cleanBodyWithLink,
   fetchArticleBody,
   fetchArticlePage,
+  shouldRefetchBody,
+  markBodyAttempt,
+  SHORT_BODY_CHARS,
   extractFeedImage,
   extractOgImage,
   ingestFeedItems,
