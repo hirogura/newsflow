@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -638,14 +638,70 @@ function extractFeedImage(raw) {
 function stripSpeakBrackets(s) {
   return (s || '').replace(/【[^】]*】/g, '');
 }
+
+/**
+ * 末尾の「続きを読む」系の誘導文を除去する（読み上げ・要約用。表示原文は保持）。
+ * 例: 「… 続きを読む →」「... 続きを読む」「全文を読む＞＞」等。
+ * RSS の contentSnippet / og:description に混入する定型文が TTS で読まれるのを防ぐ。
+ */
+function stripReadMore(s) {
+  let t = String(s == null ? '' : s);
+  if (!t) return t;
+  // 文中の孤立パターン（改行を挟む場合あり）は先に潰す
+  t = t.replace(/\s*[.…．․]{2,}\s*\r?\n?\s*…?\s*(続きを読む|全文を読む|記事全文を読む|詳しく読む|もっと読む)\s*[→➔⇒＞〉》≫>→]*\s*/gu, ' ');
+  // 末尾パターンを繰り返し除去（「… 続きを読む →」のような複合形に対応）
+  let prev;
+  do {
+    prev = t;
+    t = t.replace(/[\s\u3000\r\n]*([.…．․…・─\-‐―—～~]+)?\s*(続きを読む|全文を読む|記事全文を読む|詳しく読む|もっと読む)\s*[→➔⇒＞〉》≫>→]*[\s\u3000\r\n]*$/u, '');
+    // 矢印だけ残った残渣（「… →」等）も除去
+    t = t.replace(/[\s\u3000]*[…‥…]+\s*[→➔⇒＞〉》≫>→]+\s*$/u, '');
+  } while (t !== prev);
+  return t;
+}
+
+/**
+ * 上限文字数で丸める際に、できる限り読点・句点まで含めるための切り詰め。
+ * - 上限を超える場合、先読み範囲内で次の句点（。！？）まで延ばして切る
+ * - 句点が無ければ読点（、）まで延ばす
+ * - それも無ければ上限内の最後の句読点に切り戻す
+ * - どれも無ければハードカット＋…
+ */
+function truncateAtPunctuation(text, maxChars, lookahead = 80) {
+  const s = String(text == null ? '' : text);
+  if (!s || s.length <= maxChars) return s;
+  const head = s.slice(0, maxChars);
+  const tail = s.slice(maxChars, maxChars + lookahead);
+  // 1. 先読みで次の句点まで延ばす（閉じ括弧が続けばそれも含める）
+  const m = tail.match(/^[^。！？!?]*[。！？!?][」』）)]?/);
+  if (m) {
+    return (head + m[0]).trim();
+  }
+  // 2. 句点が無い場合は読点まで延ばす（途切れよりは自然なため）
+  const m2 = tail.match(/^[^、，,。！？!?]*[、，,]/);
+  if (m2) {
+    return (head + m2[0]).trim();
+  }
+  // 3. 上限内で最後の句読点に切り戻す（短くなりすぎる場合は切り戻さない）
+  const puncts = ['。', '！', '？', '!', '?', '、', '，', ',', '\n'];
+  let last = -1;
+  for (const p of puncts) {
+    const i = head.lastIndexOf(p);
+    if (i > last) last = i;
+  }
+  if (last >= Math.max(40, maxChars * 0.4)) {
+    return head.slice(0, last + 1).trim();
+  }
+  return head.replace(/…?$/, '…');
+}
 /**
  * 読み上げ文を組み立てる（タイトル + 本文要約）。【...】は読み上げない。
  * 空白の連続は1つにたたみ、前後の空白を除去する。
  */
 function buildSpeakText(title, extra) {
-  const t = stripSpeakBrackets(title).replace(/[ \t\u3000]+/g, ' ').trim();
+  const t = stripSpeakBrackets(stripReadMore(title)).replace(/[ \t\u3000]+/g, ' ').trim();
   const rawB = isJunkBody(extra) ? '' : (extra || '');
-  const b = stripSpeakBrackets(rawB).replace(/\s+/g, ' ').trim();
+  const b = stripSpeakBrackets(stripReadMore(rawB)).replace(/\s+/g, ' ').trim();
   if (!t) return b;
   return t + (b ? '。' + b : '');
 }
@@ -655,15 +711,18 @@ function buildSpeakText(title, extra) {
  * 本文を3文程度に要約して読み上げ用テキストを作る。
  * - 文区切り（。！？) で分割し先頭から最大3文
  * - 全体は最大 220 文字で丸める（TTS が長くなりすぎないように）
+ * - 「続きを読む」系の誘導文は読み上げない（表示原文は保持）
+ * - 上限で区切る場合はできる限り読点・句点まで含める
  */
 function summarizeText(text, maxSentences = 3, maxChars = 220) {
   if (isJunkBody(text)) return '';
-  const src = stripSpeakBrackets(text || '').replace(/\s+/g, ' ').trim();
+  let src = stripSpeakBrackets(text || '').replace(/\s+/g, ' ').trim();
+  src = stripReadMore(src).trim();
   if (!src) return '';
   const parts = src.match(/[^。！？\n]+[。！？\n]?/g) || [src];
   const sents = parts.map((s) => s.trim()).filter(Boolean).slice(0, maxSentences);
-  let out = sents.join('');
-  if (out.length > maxChars) out = out.slice(0, maxChars).replace(/…?$/, '…');
+  let out = stripReadMore(sents.join('')).trim();
+  if (out.length > maxChars) out = truncateAtPunctuation(out, maxChars);
   return out;
 }
 
@@ -2360,6 +2419,8 @@ module.exports = {
   summarizeText,
   bodyExcerpt,
   stripSpeakBrackets,
+  stripReadMore,
+  truncateAtPunctuation,
   buildSpeakText,
   titleSimilarity,
   areSimilarTitles,

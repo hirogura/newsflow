@@ -829,13 +829,28 @@ function stripSpeakBrackets(s) {
   return (s || '').replace(/【[^】]*】/g, '');
 }
 
+// 末尾の「続きを読む」系の誘導文を除去する（読み上げ用。表示原文は保持）。
+function stripReadMoreFront(s) {
+  let t = String(s == null ? '' : s);
+  if (!t) return t;
+  t = t.replace(/\s*[.…．․]{2,}\s*\r?\n?\s*…?\s*(続きを読む|全文を読む|記事全文を読む|詳しく読む|もっと読む)\s*[→➔⇒＞〉》≫>→]*\s*/gu, ' ');
+  let prev;
+  do {
+    prev = t;
+    t = t.replace(/[\s　\r\n]*([.…．․…・─\-‐―—～~]+)?\s*(続きを読む|全文を読む|記事全文を読む|詳しく読む|もっと読む)\s*[→➔⇒＞〉》≫>→]*[\s　\r\n]*$/u, '');
+    t = t.replace(/[\s　]*[…‥…]+\s*[→➔⇒＞〉》≫>→]+\s*$/u, '');
+  } while (t !== prev);
+  return t;
+}
+
 // 読み上げ文を組み立てる（タイトル + 本文）。【...】は除去する。
 // ゴミ本文（有料壁のナビ・JS混入）・残渣は無視してタイトルのみ読み上げる。
+// 「続きを読む」系の誘導文は読み上げない（表示は元のまま）。
 function buildSpeakText(title, extra, link) {
-  const t = stripSpeakBrackets(title).replace(/[ \t ]+/g, ' ').trim();
+  const t = stripSpeakBrackets(stripReadMoreFront(title)).replace(/[ \t ]+/g, ' ').trim();
   const junk = isJunkBodyFront(extra) || isYomiuriResidueFront(link, extra);
   const rawB = junk ? '' : (extra || '');
-  const b = stripSpeakBrackets(rawB).replace(/\s+/g, ' ').trim();
+  const b = stripSpeakBrackets(stripReadMoreFront(rawB)).replace(/\s+/g, ' ').trim();
   if (!t) return b;
   return t + (b ? '。' + b : '');
 }
