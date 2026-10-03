@@ -345,7 +345,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.1.9.4</div>
+  <div id="ver">v.2.0.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -731,8 +731,28 @@ function scrollToCenter() {
   if (Math.abs(delta) > 1) elList.scrollTop += delta;
 }
 
+// 有料壁などで混入するゴミ本文（サイトナビ・埋め込みJS）は読み上げ・表示から除外し、タイトルのみにする
+function isJunkBodyFront(s) {
+  const t = String(s == null ? '' : s);
+  if (!t) return false;
+  if (t.includes('YolConsts') || t.includes('optionWeatherArea') || t.includes('LOCAL_STORAGE_OPTION_WEATHER_AREA') || t.includes('weather_area_code') || t.includes('紙面ビューアー') || t.includes('localStorage.getItem')) return true;
+  if (t.includes('読売新聞販売店') || t.includes('読者会員') || t.includes('ご購読の確認')) return true;
+  if (t.includes('購読申込') && t.includes('ログイン') && (t.includes('朝刊記事') || t.includes('紙面'))) return true;
+  if (t.replace(/^\s+/, '').startsWith('あわせて読みたい')) return true;
+  return false;
+}
+// 読売の有料壁残渣（ナビ・購読案内・関連リンク・広告の抽出）は無視する。
+// 無料記事の本文は「【読売新聞】」始まりのため、それ以外の yomiuri.co.jp 本文は残渣とみなす。
+function isYomiuriResidueFront(link, s) {
+  const t = String(s == null ? '' : s);
+  if (!t) return false;
+  if (!/yomiuri\.co\.jp/i.test(String(link || ''))) return false;
+  return !t.replace(/^\s+/, '').startsWith('【読売新聞】');
+}
+
 function renderBody(cur) {
-  const text = cur.summary || cur.body;
+  const raw = cur.summary || cur.body;
+  const text = (isJunkBodyFront(raw) || isYomiuriResidueFront(cur.link, raw)) ? '' : raw;
   if (text) {
     elBody.textContent = text;
     elBody.classList.remove('empty');
@@ -799,8 +819,9 @@ function speakText() {
   // 読み上げ文: タイトル + 本文要約（3行程度・サーバー側で要約済み）。
   // 都道府県（「北海道」「全国」など）は画面表示のみで読み上げない。
   // 【NHK】【読売新聞】などの【...】も読み上げない（表示は元のまま）。
+  // 有料壁のゴミ本文・残渣は無視してタイトルのみ読み上げる。
   const extra = cur.summary || cur.body;
-  return buildSpeakText(cur.title, extra);
+  return buildSpeakText(cur.title, extra, cur.link);
 }
 
 // 【...】で囲まれた部分を読み上げ対象から除去する（表示用原文は保持）。
@@ -809,9 +830,12 @@ function stripSpeakBrackets(s) {
 }
 
 // 読み上げ文を組み立てる（タイトル + 本文）。【...】は除去する。
-function buildSpeakText(title, extra) {
+// ゴミ本文（有料壁のナビ・JS混入）・残渣は無視してタイトルのみ読み上げる。
+function buildSpeakText(title, extra, link) {
   const t = stripSpeakBrackets(title).replace(/[ \t ]+/g, ' ').trim();
-  const b = stripSpeakBrackets(extra || '').replace(/\s+/g, ' ').trim();
+  const junk = isJunkBodyFront(extra) || isYomiuriResidueFront(link, extra);
+  const rawB = junk ? '' : (extra || '');
+  const b = stripSpeakBrackets(rawB).replace(/\s+/g, ' ').trim();
   if (!t) return b;
   return t + (b ? '。' + b : '');
 }

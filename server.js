@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.9.4';
+const VERSION = '2.0.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -558,7 +558,9 @@ function normalizeItem(raw, sourceName) {
   const link = (raw.link || raw.guid || '').trim();
   const pubDate =
     raw.isoDate || raw.pubDate || (raw['dc:date'] || raw['dcterms:date'] || null);
-  const body = (raw.contentSnippet || raw.content || raw.summary || raw.description || '').toString();
+  let body = (raw.contentSnippet || raw.content || raw.summary || raw.description || '').toString();
+  // RSS 由来の本文に有料壁のゴミが混じる場合も破棄する（タイトルのみ読み上げ）
+  body = cleanBodyWithLink(body, link);
   let ts = null;
   if (pubDate) {
     const t = Date.parse(pubDate);
@@ -636,14 +638,14 @@ function extractFeedImage(raw) {
 function stripSpeakBrackets(s) {
   return (s || '').replace(/【[^】]*】/g, '');
 }
-
 /**
  * 読み上げ文を組み立てる（タイトル + 本文要約）。【...】は読み上げない。
  * 空白の連続は1つにたたみ、前後の空白を除去する。
  */
 function buildSpeakText(title, extra) {
   const t = stripSpeakBrackets(title).replace(/[ \t\u3000]+/g, ' ').trim();
-  const b = stripSpeakBrackets(extra || '').replace(/\s+/g, ' ').trim();
+  const rawB = isJunkBody(extra) ? '' : (extra || '');
+  const b = stripSpeakBrackets(rawB).replace(/\s+/g, ' ').trim();
   if (!t) return b;
   return t + (b ? '。' + b : '');
 }
@@ -655,6 +657,7 @@ function buildSpeakText(title, extra) {
  * - 全体は最大 220 文字で丸める（TTS が長くなりすぎないように）
  */
 function summarizeText(text, maxSentences = 3, maxChars = 220) {
+  if (isJunkBody(text)) return '';
   const src = stripSpeakBrackets(text || '').replace(/\s+/g, ' ').trim();
   if (!src) return '';
   const parts = src.match(/[^。！？\n]+[。！？\n]?/g) || [src];
@@ -880,6 +883,72 @@ function extractMetaContent(html, attr, value) {
   return '';
 }
 
+// ---------- ゴミ本文検出（有料記事のナビ・JS混入対策） ----------
+// 読売新聞の有料記事など、本文の代わりにサイトナビや埋め込みJSが抽出される場合がある。
+// 例: 「朝刊記事 紙面ビューアー 社説 English さがす ヘルプ let optionWeatherArea = ...」
+// こうした本文は読み上げ・表示から除外し、タイトルのみ読み上げにフォールバックする。
+const JUNK_BODY_PATTERNS = [
+  'YolConsts',
+  'optionWeatherArea',
+  'LOCAL_STORAGE_OPTION_WEATHER_AREA',
+  'weather_area_code',
+  '紙面ビューアー',
+  'localStorage.getItem',
+  // 読売の会員登録・購読案内の定型文（有料壁で本文の代わりに抽出される）
+  '読売新聞販売店',
+  '読者会員',
+  'ご購読の確認',
+];
+
+/**
+ * 記事本文として不適切なゴミ（有料壁のナビ・JS混入）かを判定する。
+ * 本文らしい通常記事に含まれ得ないページ固有の断片で検出する。
+ */
+function isJunkBody(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return false;
+  for (const p of JUNK_BODY_PATTERNS) {
+    if (p && s.includes(p)) return true;
+  }
+  // ナビ文言の詰め合わせ（単独では本文に現れ得る語もあるため組み合わせで判定）
+  if (s.includes('購読申込') && s.includes('ログイン') && (s.includes('朝刊記事') || s.includes('紙面'))) {
+    return true;
+  }
+  // 関連リンク欄の抽出（有料壁で本文の代わりに先頭の関連リンク群が取れる場合）
+  if (s.replace(/^\s+/, '').startsWith('あわせて読みたい')) {
+    return true;
+  }
+  return false;
+}
+
+/** ゴミ本文なら ''、そうでなければ原文を返す */
+function cleanBodyText(text) {
+  const s = String(text == null ? '' : text);
+  return isJunkBody(s) ? '' : s;
+}
+
+/**
+ * 読売の有料壁残渣かを判定する。
+ * 無料記事の og:description は「【読売新聞】」始まりで統一されているため、
+ * yomiuri.co.jp の本文でこの接頭辞を持たないものは、有料壁のナビ・購読案内・
+ * 関連リンク・広告のいずれかが抽出された残渣とみなす（将来の文言変動にも耐える）。
+ */
+function isYomiuriPaywallResidue(link, body) {
+  const s = String(body == null ? '' : body);
+  if (!s) return false;
+  if (!/yomiuri\.co\.jp/i.test(String(link || ''))) return false;
+  return !s.replace(/^\s+/, '').startsWith('【読売新聞】');
+}
+
+/** ゴミ本文・有料壁残渣なら ''、そうでなければ原文を返す（link 付き版） */
+function cleanBodyWithLink(text, link) {
+  const s = String(text == null ? '' : text);
+  if (!s) return s;
+  if (isJunkBody(s)) return '';
+  if (isYomiuriPaywallResidue(link, s)) return '';
+  return s;
+}
+
 /**
  * 記事HTMLから本文要約文を抽出する。優先度:
  * 1. og:description 2. meta[name=description] 3. JSON-LD NewsArticle の description 4. 長めの <p>
@@ -887,9 +956,9 @@ function extractMetaContent(html, attr, value) {
 function extractArticleDescription(html) {
   if (!html) return '';
   const og = extractMetaContent(html, 'property', 'og:description');
-  if (og && og.length >= 10) return og;
+  if (og && og.length >= 10 && !isJunkBody(og)) return og;
   const meta = extractMetaContent(html, 'name', 'description');
-  if (meta && meta.length >= 10) return meta;
+  if (meta && meta.length >= 10 && !isJunkBody(meta)) return meta;
   const ldMatch = html.match(
     /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
   );
@@ -899,14 +968,20 @@ function extractArticleDescription(html) {
       const dm = inner.match(/"description"\s*:\s*"((?:\\.|[^"\\])*)"/);
       if (dm && dm[1]) {
         const desc = decodeEntities(dm[1].replace(/\\n/g, ' ').replace(/\\"/g, '"')).trim();
-        if (desc.length >= 10) return desc;
+        if (desc.length >= 10 && !isJunkBody(desc)) return desc;
       }
     }
   }
-  // フォールバック: 30文字以上の <p> の先頭
+  // フォールバック: 30文字以上の <p> の先頭（ゴミ段落は除外する）。
+  // ただし読売の有料壁ページ（本文の代わりにナビ・購読案内・関連リンク・広告しか無い）は
+  // <p> 拾い自体を行わない（どの <p> を拾ってもゴミになるためタイトルのみにする）。
+  // 無料記事は og:description 等で先に return 済みのため影響しない。
+  const isYomiuriPaywallPage =
+    html.includes('YolConsts') || html.includes('LOCAL_STORAGE_OPTION_WEATHER_AREA');
+  if (isYomiuriPaywallPage) return '';
   const ps = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
     .map((m) => m[1].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter((t) => t.length >= 30);
+    .filter((t) => t.length >= 30 && !isJunkBody(t));
   if (ps.length > 0) return decodeEntities(ps[0]).slice(0, 500);
   return '';
 }
@@ -942,7 +1017,9 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
       return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
     }
     const html = await res.text();
-    const body = extractArticleDescription(html);
+    let body = extractArticleDescription(html);
+    // 有料壁などでナビ・JSが混入したゴミ本文は破棄し、タイトルのみ読み上げにする
+    body = cleanBodyWithLink(body, url);
     const image = extractOgImage(html);
     bodyCache.set(url, body);
     imageCache.set(url, image);
@@ -1038,19 +1115,25 @@ function loadStore() {
         if (Array.isArray(raw.store[p])) {
           store.set(
             p,
-            raw.store[p].map((e) => ({
-              prefecture: e.prefecture,
-              title: e.title,
-              link: e.link,
-              source: e.source,
-              // v1.7.0 以降は feedId を保持する。旧データは source 名から逆引きする
-              feedId: e.feedId || feedIdByName(e.source),
-              pubDate: e.pubDate || null,
-              fetchedAt: e.fetchedAt,
-              body: e.body || '',
-              summary: e.summary || (e.body ? summarizeText(e.body) : ''),
-              image: e.image || '',
-            }))
+            raw.store[p].map((e) => {
+              // 旧キャッシュに残った有料壁のゴミ本文・残渣は読み込まず、タイトルのみにする
+              const rawBody = e.body || '';
+              const cleanBody = cleanBodyWithLink(rawBody, e.link);
+              const rawSummary = e.summary || '';
+              return {
+                prefecture: e.prefecture,
+                title: e.title,
+                link: e.link,
+                source: e.source,
+                // v1.7.0 以降は feedId を保持する。旧データは source 名から逆引きする
+                feedId: e.feedId || feedIdByName(e.source),
+                pubDate: e.pubDate || null,
+                fetchedAt: e.fetchedAt,
+                body: cleanBody,
+                summary: cleanBodyWithLink(rawSummary, e.link) || (cleanBody ? summarizeText(cleanBody) : ''),
+                image: e.image || '',
+              };
+            })
           );
           for (const e of store.get(p)) {
             if (e.link && e.body) bodyCache.set(e.link, e.body);
@@ -1285,6 +1368,11 @@ function flatItems() {
     for (const e of list) {
       if (!isWithinHours(e, settings.maxAgeHours, nowMs)) continue;
       if (!isFeedEnabledFor(e, enabledIds)) continue;
+      // 旧キャッシュ由来のゴミ本文・有料壁残渣が残っていても表示・読み上げに出さない
+      const rawBody = e.body || bodyCache.get(e.link) || '';
+      const body = cleanBodyWithLink(rawBody, e.link);
+      const rawSummary = e.summary || '';
+      const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
       out.push({
         prefecture: e.prefecture || pref,
         title: e.title,
@@ -1292,8 +1380,8 @@ function flatItems() {
         source: e.source,
         pubDate: e.pubDate || null,
         fetchedAt: e.fetchedAt,
-        body: e.body || bodyCache.get(e.link) || '',
-        summary: e.summary || summarizeText(e.body || bodyCache.get(e.link) || ''),
+        body,
+        summary,
         image: e.image || imageCache.get(e.link) || '',
       });
     }
@@ -1366,8 +1454,10 @@ function buildPrefectures() {
       prefecture: pref,
       news: list.map((e) => {
         const g = byKey.get(memberKey(e, pref));
-        const body = e.body || bodyCache.get(e.link) || '';
-        const summary = e.summary || summarizeText(body);
+        const rawBody = e.body || bodyCache.get(e.link) || '';
+        const body = cleanBodyWithLink(rawBody, e.link);
+        const rawSummary = e.summary || '';
+        const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
         const image = e.image || imageCache.get(e.link) || '';
         const members = (g && membersByGroup.get(g.groupId)) || [];
         return {
@@ -2114,12 +2204,17 @@ app.get('/api/article', async (req, res) => {
   if (!url || !/^https?:\/\//.test(url)) {
     return res.status(400).json({ ok: false, error: 'url パラメータが必要です' });
   }
-  // store に本文があればそれを返す
+  // store に本文があればそれを返す（ゴミ本文はタイトルのみ扱いにする）
   for (const [, list] of store) {
-    const hit = list.find((e) => e.link === url && e.body);
+    const hit = list.find((e) => e.link === url && (e.body || e.summary));
     if (hit) {
       const image = hit.image || imageCache.get(url) || '';
-      return res.json({ ok: true, url, body: hit.body, summary: hit.summary || summarizeText(hit.body), image, cached: true });
+      const body = cleanBodyWithLink(hit.body, url);
+      const summary = cleanBodyWithLink(hit.summary, url) || summarizeText(body);
+      if (!body && !summary) {
+        return res.json({ ok: true, url, body: '', summary: '', image, cached: true });
+      }
+      return res.json({ ok: true, url, body, summary, image, cached: true });
     }
   }
   const { body, image } = await fetchArticlePage(url);
@@ -2274,6 +2369,10 @@ module.exports = {
   decodeEntities,
   extractMetaContent,
   extractArticleDescription,
+  isJunkBody,
+  cleanBodyText,
+  isYomiuriPaywallResidue,
+  cleanBodyWithLink,
   fetchArticleBody,
   fetchArticlePage,
   extractFeedImage,
