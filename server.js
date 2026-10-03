@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '1.9.1';
+const VERSION = '1.9.2';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1523,7 +1523,9 @@ app.get('/api/status', (req, res) => {
 });
 
 // バージョン情報（トップページの小さな版表示用）
+// 更新直後に古い値が残らないよう、ブラウザ／プロキシのキャッシュを禁止する
 app.get('/api/version', (req, res) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
   res.json({ ok: true, version: VERSION, display: `v.${VERSION}` });
 });
 
