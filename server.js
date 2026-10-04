@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.5.0';
+const VERSION = '2.6.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -50,7 +50,7 @@ const DEFAULT_SETTINGS = {
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
   ttsEngine: 'browser', // 読み上げエンジン（'browser' / 'voicevox'）
-  voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3）
+  voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3。2=四国めたん / 52=雀松朱司）
   theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
@@ -200,7 +200,7 @@ function controlEnabled() {
   return !(v === '1' || v === 'true');
 }
 
-// ---------- VOICEVOX（ずんだもん読み上げ, v2.5.0） ----------
+// ---------- VOICEVOX（読み上げ, v2.6.0） ----------
 // Node サーバーが VOICEVOX ENGINE へプロキシする（CORS・公開ポート回避のため
 // ブラウザから直接 127.0.0.1:50021 を叩かない。フロントは POST /api/tts のみ使う）。
 // 環境変数: VOICEVOX_PORT（既定 50021）/ VOICEVOX_HOST（既定 127.0.0.1）/
@@ -210,7 +210,22 @@ const VOICEVOX_HOST = process.env.VOICEVOX_HOST || '127.0.0.1';
 const VOICEVOX_DIR = process.env.VOICEVOX_DIR || path.join(__dirname, 'voicevox');
 const VOICEVOX_ENGINE_VERSION_FALLBACK = process.env.VOICEVOX_VERSION || '0.25.2';
 // 既定話者: ずんだもん（ノーマル, speaker id = 3）
+// 選択肢（管理画面のボタンと対応）:
+// - ずんだもん（ノーマル）= 3 / - 四国めたん（ノーマル）= 2 / - 雀松朱司（ノーマル）= 52
 const VOICEVOX_SPEAKER_DEFAULT = 3;
+const VOICEVOX_SPEAKERS = [
+  { id: 3, name: 'ずんだもん' },
+  { id: 2, name: '四国めたん' },
+  { id: 52, name: '雀松朱司' },
+];
+const VOICEVOX_SPEAKER_IDS = VOICEVOX_SPEAKERS.map((s) => s.id);
+/** 話者IDから表示名を返す（未知IDは `ID <n>` 表記。メッセージ表示用） */
+function voicevoxSpeakerName(speaker) {
+  const n = Number(speaker);
+  const hit = VOICEVOX_SPEAKERS.find((s) => s.id === n);
+  if (hit) return hit.name;
+  return Number.isFinite(n) ? `ID ${n}` : 'ずんだもん';
+}
 const VOICEVOX_RUN_ARGS = ['--host', VOICEVOX_HOST, '--port', String(VOICEVOX_PORT)];
 
 function voicevoxRunPath() {
@@ -395,7 +410,7 @@ async function startVoicevox() {
     if (r.ok) engineVersion = (await r.json().catch(() => null)) ?? null;
     if (typeof engineVersion !== 'string') engineVersion = String(engineVersion ?? '');
   } catch (_) {}
-  setVoicevoxStatus({ phase: 'ready', message: 'VOICEVOX で読み上げ中（ずんだもん）', error: null, running: true, engineVersion });
+  setVoicevoxStatus({ phase: 'ready', message: `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`, error: null, running: true, engineVersion });
   return voicevoxStatus;
 }
 
@@ -2921,7 +2936,7 @@ function handleSettingsUpdate(req, res) {
 app.put('/api/settings', handleSettingsUpdate);
 app.post('/api/settings', handleSettingsUpdate);
 
-// ---- VOICEVOX API（v2.5.0。install/stop は制御系と同じく DISABLE_CONTROL=1 で無効化） ----
+// ---- VOICEVOX API（v2.6.0。install/stop は制御系と同じく DISABLE_CONTROL=1 で無効化） ----
 app.get('/api/voicevox/status', async (req, res) => {
   const installed = isVoicevoxInstalled();
   let running = false;
@@ -2931,17 +2946,35 @@ app.get('/api/voicevox/status', async (req, res) => {
   voicevoxStatus.installed = installed;
   voicevoxStatus.running = running;
   if (voicevoxInstalling) {
-    return res.json({ ok: true, installing: true, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, ...voicevoxStatus });
+    return res.json({ ok: true, installing: true, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
   }
   if (running && voicevoxStatus.phase !== 'ready') {
     voicevoxStatus.phase = 'ready';
-    voicevoxStatus.message = 'VOICEVOX で読み上げ中（ずんだもん）';
+    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`;
   }
   if (!running && voicevoxStatus.phase === 'ready') {
     voicevoxStatus.phase = 'idle';
     voicevoxStatus.message = installed ? 'インストール済み（停止中）' : '未インストール';
   }
-  res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, ...voicevoxStatus });
+  res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
+});
+
+// 話者切替: 管理画面の「ずんだもん」「四国めたん」「雀松朱司」ボタン用。
+// /api/settings でも変更できるが、こちらは話者に特化した短縮API。
+app.post('/api/voicevox/speaker', (req, res) => {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const raw = body.speaker != null ? body.speaker : body.voicevoxSpeaker;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || !VOICEVOX_SPEAKER_IDS.includes(n)) {
+    return res.status(400).json({ ok: false, error: 'speaker は 2（四国めたん）・3（ずんだもん）・52（雀松朱司）のいずれかを指定してください' });
+  }
+  settings = normalizeSettings({ voicevoxSpeaker: n }, settings);
+  saveSettings();
+  voicevoxStatus.speaker = settings.voicevoxSpeaker;
+  if (voicevoxStatus.phase === 'ready') {
+    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`;
+  }
+  res.json({ ok: true, speaker: settings.voicevoxSpeaker, speakerName: voicevoxSpeakerName(settings.voicevoxSpeaker), speakers: VOICEVOX_SPEAKERS, settings });
 });
 
 app.post('/api/voicevox/install', (req, res) => {
@@ -3451,11 +3484,14 @@ module.exports = {
   similarity: titleSimilarity,
   clusterItems: assignGroups,
   extractMeta: extractArticleDescription,
-  // VOICEVOX（ずんだもん読み上げ, v2.5.0）
+  // VOICEVOX（読み上げ, v2.6.0）
   VOICEVOX_PORT,
   VOICEVOX_HOST,
   VOICEVOX_DIR,
   VOICEVOX_SPEAKER_DEFAULT,
+  VOICEVOX_SPEAKERS,
+  VOICEVOX_SPEAKER_IDS,
+  voicevoxSpeakerName,
   VOICEVOX_ENGINE_VERSION_FALLBACK,
   get voicevoxStatus() { return voicevoxStatus; },
   isVoicevoxInstalled,

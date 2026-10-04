@@ -148,15 +148,21 @@
   <div><button class="primary" type="submit">設定を保存する</button></div>
 </form>
 
-<h2 style="font-size:16px;margin:24px 0 10px;">VOICEVOX読み上げ（ずんだもん）</h2>
+<h2 style="font-size:16px;margin:24px 0 10px;">VOICEVOX読み上げ</h2>
 <div class="add" id="voicevoxBox">
   <div id="vvStatus" style="font-size:13px;color:#bbb;">VOICEVOXの状態を確認しています…</div>
   <div id="vvProgress" style="font-size:13px;color:#8ab4ff;min-height:1.5em;"></div>
+  <div class="row" style="margin-bottom:8px;">
+    <span style="font-size:13px;color:#bbb;">話者:</span>
+    <button id="vvSpeakerZunda" data-speaker="3" type="button">ずんだもん</button>
+    <button id="vvSpeakerMetan" data-speaker="2" type="button">四国めたん</button>
+    <button id="vvSpeakerAkashi" data-speaker="52" type="button">雀松朱司</button>
+  </div>
   <div class="row" style="margin-bottom:0;">
     <button id="vvInstallBtn" class="primary" type="button">VOICEVOXを使用する</button>
     <button id="vvBrowserBtn" type="button">ブラウザ読み上げに戻す</button>
   </div>
-  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、読み上げがずんだもん（ノーマル）に切り替わります。使えない場合はブラウザ読み上げにフォールバックします。</div>
+  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」を切り替えられます。使えない場合はブラウザ読み上げにフォールバックします。</div>
 </div>
 
 <h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
@@ -438,6 +444,9 @@ async function loadSettings() {
       applyTheme(s.theme);
     }
     if (s.weatherArea != null) document.getElementById('sWeather').value = String(s.weatherArea);
+    if (s.voicevoxSpeaker != null && typeof updateVvSpeakerButtons === 'function') {
+      try { updateVvSpeakerButtons(Number(s.voicevoxSpeaker)); } catch (_) {}
+    }
   } catch (e) { /* 無視 */ }
 }
 
@@ -538,11 +547,38 @@ document.getElementById('importForm').addEventListener('submit', async (e) => {
   }
 });
 
-// ---- VOICEVOX（ずんだもん読み上げ, v2.5.0） ----
+// ---- VOICEVOX（読み上げ, v2.6.0） ----
 let vvPollTimer = null;
+// 管理画面で選べる話者（server.js の VOICEVOX_SPEAKERS と対応）
+const VV_SPEAKERS = [
+  { id: 3, name: 'ずんだもん' },
+  { id: 2, name: '四国めたん' },
+  { id: 52, name: '雀松朱司' },
+];
+function vvSpeakerName(id) {
+  const n = Number(id);
+  const hit = VV_SPEAKERS.find((s) => s.id === n);
+  return hit ? hit.name : ('ID ' + id);
+}
+function vvCurrentSpeaker(s) {
+  if (!s) return 3;
+  const raw = s.speaker != null ? s.speaker : s.voicevoxSpeaker;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : 3;
+}
+function updateVvSpeakerButtons(speaker) {
+  const n = Number(speaker);
+  for (const sp of VV_SPEAKERS) {
+    const btn = document.querySelector('#voicevoxBox [data-speaker="' + sp.id + '"]');
+    if (!btn) continue;
+    const active = n === sp.id;
+    btn.classList.toggle('primary', active);
+    btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+}
 function vvText(s) {
   if (!s) return 'VOICEVOXの状態を取得できませんでした。';
-  const engine = s.ttsEngine === 'voicevox' ? '現在の読み上げ: VOICEVOX（ずんだもん）' : '現在の読み上げ: ブラウザ標準';
+  const engine = s.ttsEngine === 'voicevox' ? '現在の読み上げ: VOICEVOX（' + vvSpeakerName(vvCurrentSpeaker(s)) + '）' : '現在の読み上げ: ブラウザ標準';
   const base = s.phase === 'ready' ? 'VOICEVOX起動中'
     : s.phase === 'downloading' ? 'ダウンロード中'
     : s.phase === 'extracting' ? '展開中'
@@ -562,13 +598,14 @@ async function loadVoicevoxStatus() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const s = await res.json();
     if (el) el.textContent = vvText(s);
+    updateVvSpeakerButtons(vvCurrentSpeaker(s));
     if (pr) {
       if (s.phase === 'downloading' && s.progress != null) {
         pr.textContent = '進捗: ' + s.progress + '%';
       } else if (s.phase === 'downloading' || s.phase === 'extracting' || s.phase === 'starting') {
         pr.textContent = '処理中… このままお待ちください（数分かかります）。';
       } else if (s.phase === 'ready' && s.ttsEngine === 'voicevox') {
-        pr.textContent = 'VOICEVOX で読み上げ中です（ずんだもん ノーマル）。';
+        pr.textContent = 'VOICEVOX で読み上げ中です（' + vvSpeakerName(vvCurrentSpeaker(s)) + ' ノーマル）。';
       } else {
         pr.textContent = '';
       }
@@ -585,6 +622,28 @@ async function loadVoicevoxStatus() {
   } catch (e) {
     if (el) el.textContent = 'VOICEVOXの状態を取得できませんでした: ' + e.message;
   }
+}
+async function setVoicevoxSpeaker(id) {
+  showMsg('');
+  const n = Number(id);
+  try {
+    const res = await fetch('/api/voicevox/speaker', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speaker: n }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    updateVvSpeakerButtons(data.speaker);
+    showMsg('話者を' + vvSpeakerName(data.speaker) + 'に切り替えました。', 'ok');
+    loadVoicevoxStatus();
+  } catch (e2) {
+    showMsg('話者の切り替えに失敗しました: ' + e2.message, 'err');
+  }
+}
+for (const sp of VV_SPEAKERS) {
+  const btn = document.querySelector('#voicevoxBox [data-speaker="' + sp.id + '"]');
+  if (btn) btn.addEventListener('click', () => setVoicevoxSpeaker(sp.id));
 }
 document.getElementById('vvInstallBtn').addEventListener('click', async () => {
   showMsg('');

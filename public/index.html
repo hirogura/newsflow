@@ -364,7 +364,7 @@ let wakeLock = null;
 // 読み上げ設定（/api/settings から取得。管理画面で変更可）
 let ttsEnabled = true;
 let ttsRate = 1.2;
-// VOICEVOX 読み上げ（v2.5.0）: 'browser'（既定・Web Speech API）/ 'voicevox'（ずんだもん）
+// VOICEVOX 読み上げ（v2.6.0）: 'browser'（既定・Web Speech API）/ 'voicevox'（ずんだもん/四国めたん/雀松朱司）
 let ttsEngine = 'browser';
 let voicevoxSpeaker = 3;
 let voicevoxAudio = null;
@@ -870,7 +870,7 @@ function speak(text, onend) {
     pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 4000);
     return;
   }
-  // VOICEVOX（ずんだもん）指定時はサーバープロキシ経由の WAV 再生を試みる。
+  // VOICEVOX 指定時はサーバープロキシ経由の WAV 再生を試みる。
   // 使えない場合は従来どおりブラウザ TTS にフォールバックする。
   if (ttsEngine === 'voicevox') {
     speakVoicevox(text, onend);
