@@ -365,9 +365,15 @@ let wakeLock = null;
 let ttsEnabled = true;
 let ttsRate = 1.2;
 // VOICEVOX 読み上げ（v2.6.0）: 'browser'（既定・Web Speech API）/ 'voicevox'（ずんだもん/四国めたん/雀松朱司）
+// v2.7.0: VOICEVOX 指定時は次の記事の音声を再生中に先読み（プリフェッチ）し、記事間の無音区間を短縮する
 let ttsEngine = 'browser';
 let voicevoxSpeaker = 3;
 let voicevoxAudio = null;
+// 先読みキャッシュ: key（話者ID + 読み上げ文）-> WAV の object URL。再生直後に次記事分を裏で合成する
+let voicevoxCache = new Map();
+let voicevoxPending = new Map();
+const VOICEVOX_PREFETCH_AHEAD = 2;
+const VOICEVOX_CACHE_MAX = 4;
 // 一時停止・発話世代管理・バックグラウンド更新
 // - playSeq: speak() ごとに加算する世代番号。Chrome は speechSynthesis.cancel() 時に
 //   古い発話の onend/onerror を非同期発火させるため、世代が一致しない終了通知は無視する
@@ -684,6 +690,11 @@ async function backfillBody(item) {
     if (data && data.image && !item.image) {
       item.image = data.image;
     }
+    // 本文が埋まった先読み対象は読み上げ文が変わるため、裏合成を更新する
+    try {
+      const j = playlist.indexOf(item);
+      if (j !== -1 && j > idx && j <= idx + VOICEVOX_PREFETCH_AHEAD) prefetchVoicevoxAhead();
+    } catch (e) {}
     // 既に次の記事へ移動していたら表示は触らない
     if (playlist[idx] !== item) return;
     renderBody(item);
@@ -880,42 +891,116 @@ function speak(text, onend) {
 }
 
 // VOICEVOX 音声再生（POST /api/tts → WAV → Audio 要素）
-function speakVoicevox(text, onend) {
-  const mySeq = ++playSeq;
-  stopVoicevoxAudioOnly();
-  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
-  fetch('/api/tts', {
+// v2.7.0: 先読みキャッシュ対応。再生開始後に次記事分を裏で合成し、記事切替時の無音区間を短縮する
+function voicevoxCacheKey(text, speaker) {
+  return String(speaker) + '::' + String(text);
+}
+function touchVoicevoxCache(key) {
+  const url = voicevoxCache.get(key);
+  if (url !== undefined) {
+    voicevoxCache.delete(key);
+    voicevoxCache.set(key, url);
+  }
+  return url;
+}
+function storeVoicevoxCache(key, url) {
+  if (voicevoxCache.has(key)) {
+    const old = voicevoxCache.get(key);
+    voicevoxCache.delete(key);
+    if (old && old !== url) { try { URL.revokeObjectURL(old); } catch (e) {} }
+  }
+  voicevoxCache.set(key, url);
+  while (voicevoxCache.size > VOICEVOX_CACHE_MAX) {
+    const oldest = voicevoxCache.keys().next().value;
+    const oldestUrl = voicevoxCache.get(oldest);
+    voicevoxCache.delete(oldest);
+    // 再生中の URL は revoke しない（voicevoxAudio が参照中の可能性があるため）
+    let inUse = false;
+    try { inUse = !!(voicevoxAudio && voicevoxAudio.src && oldestUrl && voicevoxAudio.src === oldestUrl); } catch (e) {}
+    if (!inUse && oldestUrl) { try { URL.revokeObjectURL(oldestUrl); } catch (e) {} }
+  }
+}
+// 合成リクエスト（キャッシュ命中時は即解決。重複リクエストは1つにまとめる）
+function fetchVoicevoxAudio(text, speaker) {
+  const key = voicevoxCacheKey(text, speaker);
+  const hit = touchVoicevoxCache(key);
+  if (hit) return Promise.resolve(hit);
+  const pend = voicevoxPending.get(key);
+  if (pend) return pend;
+  const p = fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, speaker: voicevoxSpeaker }),
+    body: JSON.stringify({ text, speaker }),
   }).then((res) => {
-    if (mySeq !== playSeq || paused) return;
     if (!res.ok) throw new Error('TTS HTTP ' + res.status);
     return res.blob();
   }).then((blob) => {
-    if (!blob || mySeq !== playSeq || paused) return;
+    if (!blob) throw new Error('empty audio');
     const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    voicevoxAudio = audio;
-    audio.onended = () => {
-      try { URL.revokeObjectURL(url); } catch (e) {}
-      if (voicevoxAudio === audio) voicevoxAudio = null;
-      if (mySeq !== playSeq) return;
-      if (paused) { speaking = false; return; }
-      onend();
-    };
-    audio.onerror = () => {
-      try { URL.revokeObjectURL(url); } catch (e) {}
-      if (voicevoxAudio === audio) voicevoxAudio = null;
-      if (mySeq !== playSeq) return;
-      // 失敗時はブラウザ TTS にフォールバックする
-      speakBrowser(text, onend);
-    };
-    audio.play().catch(() => {
+    storeVoicevoxCache(key, url);
+    voicevoxPending.delete(key);
+    return url;
+  }).catch((e) => {
+    voicevoxPending.delete(key);
+    throw e;
+  });
+  voicevoxPending.set(key, p);
+  return p;
+}
+// playlist 上の次記事（最大 PREFETCH_AHEAD 件分）の読み上げ文を裏で合成する
+function prefetchVoicevoxAhead() {
+  if (ttsEngine !== 'voicevox' || !ttsEnabled || !started || paused) return;
+  if (!Array.isArray(playlist) || playlist.length === 0) return;
+  for (let a = 1; a <= VOICEVOX_PREFETCH_AHEAD; a++) {
+    const j = idx + a;
+    if (j < 0 || j >= playlist.length) continue;
+    try {
+      const item = playlist[j];
+      if (!item) continue;
+      const t = buildSpeakText(item.title, item.summary || item.body, item.link);
+      if (!t) continue;
+      const key = voicevoxCacheKey(t, voicevoxSpeaker);
+      if (voicevoxCache.has(key) || voicevoxPending.has(key)) continue;
+      fetchVoicevoxAudio(t, voicevoxSpeaker).catch(() => {});
+    } catch (e) { /* 先読み失敗は無視（本番再生時に通常取得する） */ }
+  }
+}
+function playVoicevoxUrl(url, text, mySeq, onend) {
+  const audio = new Audio(url);
+  voicevoxAudio = audio;
+  audio.onended = () => {
+    if (voicevoxAudio === audio) voicevoxAudio = null;
+    if (mySeq !== playSeq) return;
+    if (paused) { speaking = false; return; }
+    onend();
+  };
+  audio.onerror = () => {
+    if (voicevoxAudio === audio) voicevoxAudio = null;
+    if (mySeq !== playSeq) return;
+    // 失敗時はブラウザ TTS にフォールバックする
+    speakBrowser(text, onend);
+  };
+  const pr = audio.play();
+  if (pr && typeof pr.then === 'function') {
+    pr.then(() => {
+      // 再生が始まったら次の記事を裏で合成する（現在の再生と並行して隠蔽する）
+      prefetchVoicevoxAhead();
+    }).catch(() => {
       if (voicevoxAudio === audio) voicevoxAudio = null;
       if (mySeq !== playSeq) return;
       speakBrowser(text, onend);
     });
+  } else {
+    prefetchVoicevoxAhead();
+  }
+}
+function speakVoicevox(text, onend) {
+  const mySeq = ++playSeq;
+  stopVoicevoxAudioOnly();
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+  fetchVoicevoxAudio(text, voicevoxSpeaker).then((url) => {
+    if (mySeq !== playSeq || paused) return;
+    playVoicevoxUrl(url, text, mySeq, onend);
   }).catch(() => {
     if (mySeq !== playSeq) return;
     if (paused) { speaking = false; return; }
@@ -1041,6 +1126,13 @@ async function playAt(i) {
   idx = i;
   const cur = playlist[idx];
   backfillBody(cur); // 非同期で補完（表示・次周に反映）
+  // 先読み対象の本文も裏で補完する（読み上げ文が確定してから音声を合成するため）
+  try {
+    for (let a = 1; a <= VOICEVOX_PREFETCH_AHEAD; a++) {
+      const nxt = playlist[idx + a];
+      if (nxt) backfillBody(nxt);
+    }
+  } catch (e) {}
   maybeRefreshInBackground();
   speaking = true;
   speak(speakText(), () => {
