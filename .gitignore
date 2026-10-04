@@ -1,6 +1,7 @@
 node_modules/
 data/
 test/
+voicevox/
 data/feeds.json
 data/news.json
 data/settings.json

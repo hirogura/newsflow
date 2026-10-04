@@ -140,6 +140,31 @@ sudo pacman -S speech-dispatcher espeak-ng
 `chrome://settings` の「音声合成」または OS の音声設定で
 日本語音声が有効か確認してください。
 
+## 8b. VOICEVOX読み上げ（ずんだもん・v2.5.0〜）
+
+管理画面（`/admin.html`）の「VOICEVOX読み上げ」にある
+「VOICEVOXを使用する」ボタンを押すと、サーバーが VOICEVOX ENGINE を
+自動インストール（ダウンロード約1.8GB→展開約2.2GB→起動）します。
+インストール進捗は画面に表示され、完了すると自動で VOICEVOX 読み上げに切り替わります。
+
+- 既定話者はずんだもん（ノーマル, speaker id = `3`）。
+- フロントは `POST /api/tts` にテキストを送り、返ってきた WAV を `Audio` 要素で再生します
+  （ブラウザから直接 `127.0.0.1:50021` を叩かないサーバープロキシ方式のため CORS・公開ポートの心配なし）。
+- VOICEVOX が使えない場合（未インストール・停止・合成失敗）は従来どおりブラウザ TTS にフォールバックします。
+- `ttsEngine` はサーバー設定（`data/settings.json`・`GET/PUT /api/settings`）に保持されます。
+- API: `GET /api/voicevox/status`（状態・進捗ポーリング用）/
+  `POST /api/voicevox/install`（制御系と同じく `DISABLE_CONTROL=1` で無効化）/
+  `POST /api/voicevox/stop`（停止してブラウザ読み上げに戻す）/
+  `POST /api/tts`（`{ text, speaker }` → `audio/wav`）。
+- 実体は `voicevox/` 配下に展開されます（`.gitignore` 対象・コミットしません）。
+  未導入環境では `7z` が無ければ `apt-get install -y 7zip` で自動導入を試みます。
+- 再起動時は `ttsEngine=voicevox` かつ展開済みなら ENGINE を自動起動します。
+
+ずんだもんの音声ライブラリは VOICEVOX（https://voicevox.hiroshiba.jp/）のものです。
+VOICEVOX: ヒホ氏・VOICEVOX OSS（https://github.com/VOICEVOX/voicevox_engine）。
+ずんだもん公式: https://zundamon.jp/（東北ずん子・ずんだもんプロジェクト）。
+キャラクター利用時は各ライセンス・クレジット表記に従ってください。
+
 ## 補足: 既知の制約・改善余地
 
 - 都道府県判定は部分一致のため誤検知があり得ます
@@ -175,7 +200,7 @@ sudo pacman -S speech-dispatcher espeak-ng
 - エクスポート: `GET /api/feeds/export`（管理画面のボタンで JSON 保存）。
 - インポート: `POST /api/feeds/import`（`{ feeds, mode: "replace"|"merge" }`）。
 - 表示・読み上げ設定: `GET/PUT /api/settings`
-  （取得間隔 5〜180分 / N時間以内の表示 1〜168時間 / 読み上げ On-Off / 速度5段階 0.8,1.0,1.2,1.4,1.6 / 画面テーマ dark・light・light-modern）。
+  （取得間隔 5〜180分 / N時間以内の表示 1〜168時間 / 読み上げ On-Off / 速度5段階 0.8,1.0,1.2,1.4,1.6 / 読み上げエンジン browser・voicevox（ずんだもん） / 画面テーマ dark・light・light-modern）。
   テーマはサーバーに保持され、サイネージ画面と管理画面の両方に反映されます。
 
 ## トップ画面の操作ボタン
@@ -247,6 +272,11 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
 | `BODY_CACHE_MAX` | `2000` | 本文キャッシュ最大件数（現行は 1000 件で古いものから破棄） |
 | `EEW_ENABLED` | `1` | 緊急地震速報の購読（`0`/`false`/`off`/`no` で無効。既定は有効） |
 | `EEW_WS_URL` | `wss://ws-api.wolfx.jp/jma_eew` | EEW 購読先の WebSocket URL |
+| `VOICEVOX_PORT` | `50021` | VOICEVOX ENGINE の待受ポート |
+| `VOICEVOX_HOST` | `127.0.0.1` | VOICEVOX ENGINE の待受ホスト |
+| `VOICEVOX_DIR` | `<repo>/voicevox` | VOICEVOX ENGINE の展開先 |
+| `VOICEVOX_VERSION` | （最新） | 固定したい ENGINE 版（既定は GitHub latest。検証済み `0.25.2`） |
+| `DISABLE_CONTROL` | （空） | `1` で制御系 API（update/restart・voicevox install/stop・eew mock）を無効化 |
 
 ## アンインストール
 

@@ -345,7 +345,7 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.2.0.0</div>
+  <div id="ver">v.2.5.0</div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>
@@ -364,6 +364,10 @@ let wakeLock = null;
 // 読み上げ設定（/api/settings から取得。管理画面で変更可）
 let ttsEnabled = true;
 let ttsRate = 1.2;
+// VOICEVOX 読み上げ（v2.5.0）: 'browser'（既定・Web Speech API）/ 'voicevox'（ずんだもん）
+let ttsEngine = 'browser';
+let voicevoxSpeaker = 3;
+let voicevoxAudio = null;
 // 一時停止・発話世代管理・バックグラウンド更新
 // - playSeq: speak() ごとに加算する世代番号。Chrome は speechSynthesis.cancel() 時に
 //   古い発話の onend/onerror を非同期発火させるため、世代が一致しない終了通知は無視する
@@ -639,6 +643,8 @@ async function loadSettings() {
     const s = (data && data.settings) || {};
     if (typeof s.ttsEnabled === 'boolean') ttsEnabled = s.ttsEnabled;
     if (Number.isFinite(Number(s.ttsRate))) ttsRate = Number(s.ttsRate);
+    ttsEngine = s.ttsEngine === 'voicevox' ? 'voicevox' : 'browser';
+    if (Number.isFinite(Number(s.voicevoxSpeaker))) voicevoxSpeaker = Number(s.voicevoxSpeaker);
     if (s.theme === 'light' || s.theme === 'dark' || s.theme === 'light-modern') applyTheme(s.theme);
   } catch (e) { /* 既定値で継続 */ }
 }
@@ -864,6 +870,69 @@ function speak(text, onend) {
     pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 4000);
     return;
   }
+  // VOICEVOX（ずんだもん）指定時はサーバープロキシ経由の WAV 再生を試みる。
+  // 使えない場合は従来どおりブラウザ TTS にフォールバックする。
+  if (ttsEngine === 'voicevox') {
+    speakVoicevox(text, onend);
+    return;
+  }
+  speakBrowser(text, onend);
+}
+
+// VOICEVOX 音声再生（POST /api/tts → WAV → Audio 要素）
+function speakVoicevox(text, onend) {
+  const mySeq = ++playSeq;
+  stopVoicevoxAudioOnly();
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+  fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, speaker: voicevoxSpeaker }),
+  }).then((res) => {
+    if (mySeq !== playSeq || paused) return;
+    if (!res.ok) throw new Error('TTS HTTP ' + res.status);
+    return res.blob();
+  }).then((blob) => {
+    if (!blob || mySeq !== playSeq || paused) return;
+    const url = URL.createObjectURL(blob);
+    const audio = new Audio(url);
+    voicevoxAudio = audio;
+    audio.onended = () => {
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      if (voicevoxAudio === audio) voicevoxAudio = null;
+      if (mySeq !== playSeq) return;
+      if (paused) { speaking = false; return; }
+      onend();
+    };
+    audio.onerror = () => {
+      try { URL.revokeObjectURL(url); } catch (e) {}
+      if (voicevoxAudio === audio) voicevoxAudio = null;
+      if (mySeq !== playSeq) return;
+      // 失敗時はブラウザ TTS にフォールバックする
+      speakBrowser(text, onend);
+    };
+    audio.play().catch(() => {
+      if (voicevoxAudio === audio) voicevoxAudio = null;
+      if (mySeq !== playSeq) return;
+      speakBrowser(text, onend);
+    });
+  }).catch(() => {
+    if (mySeq !== playSeq) return;
+    if (paused) { speaking = false; return; }
+    speakBrowser(text, onend);
+  });
+}
+
+function stopVoicevoxAudioOnly() {
+  if (voicevoxAudio) {
+    try { voicevoxAudio.pause(); } catch (e) {}
+    try { voicevoxAudio.removeAttribute('src'); } catch (e) {}
+    voicevoxAudio = null;
+  }
+}
+
+function speakBrowser(text, onend) {
+  stopVoicevoxAudioOnly();
   if (!('speechSynthesis' in window)) {
     if (pendingTimer) clearTimeout(pendingTimer);
     pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 8000);
@@ -898,6 +967,7 @@ function stopSpeech() {
   // 古い発話の遅延 onend/onerror を無効化してから停止する（Chrome 対策）
   playSeq++;
   if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
+  stopVoicevoxAudioOnly();
   try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
 }
 

@@ -15,12 +15,12 @@ const cors = require('cors');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execFile, exec } = require('child_process');
+const { execFile, exec, spawn } = require('child_process');
 const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.4.6';
+const VERSION = '2.5.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -49,6 +49,8 @@ const DEFAULT_SETTINGS = {
   maxAgeHours: 24, // この時間以内のニュースのみ表示
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
+  ttsEngine: 'browser', // 読み上げエンジン（'browser' / 'voicevox'）
+  voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3）
   theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
@@ -104,6 +106,15 @@ function normalizeSettings(input, base) {
   }
   if (src.ttsRate !== undefined) {
     s.ttsRate = snapRate(src.ttsRate);
+  }
+  if (src.ttsEngine !== undefined) {
+    const t = String(src.ttsEngine).trim().toLowerCase();
+    // 'voicevox' / 'zundamon' / 'zunda' は VOICEVOX 扱い、それ以外は browser に寄せる
+    s.ttsEngine = (t === 'voicevox' || t === 'zundamon' || t === 'zunda') ? 'voicevox' : 'browser';
+  }
+  if (src.voicevoxSpeaker !== undefined) {
+    const n = parseInt(src.voicevoxSpeaker, 10);
+    s.voicevoxSpeaker = Number.isFinite(n) && n >= 0 && n <= 100 ? n : b.voicevoxSpeaker;
   }
   if (src.theme !== undefined) {
     const t = String(src.theme).toLowerCase();
@@ -187,6 +198,279 @@ function scheduleFetch() {
 function controlEnabled() {
   const v = process.env.DISABLE_CONTROL;
   return !(v === '1' || v === 'true');
+}
+
+// ---------- VOICEVOX（ずんだもん読み上げ, v2.5.0） ----------
+// Node サーバーが VOICEVOX ENGINE へプロキシする（CORS・公開ポート回避のため
+// ブラウザから直接 127.0.0.1:50021 を叩かない。フロントは POST /api/tts のみ使う）。
+// 環境変数: VOICEVOX_PORT（既定 50021）/ VOICEVOX_HOST（既定 127.0.0.1）/
+//           VOICEVOX_DIR（既定 <repo>/voicevox）/ VOICEVOX_VERSION（固定したい場合）
+const VOICEVOX_PORT = parseInt(process.env.VOICEVOX_PORT || '50021', 10) || 50021;
+const VOICEVOX_HOST = process.env.VOICEVOX_HOST || '127.0.0.1';
+const VOICEVOX_DIR = process.env.VOICEVOX_DIR || path.join(__dirname, 'voicevox');
+const VOICEVOX_ENGINE_VERSION_FALLBACK = process.env.VOICEVOX_VERSION || '0.25.2';
+// 既定話者: ずんだもん（ノーマル, speaker id = 3）
+const VOICEVOX_SPEAKER_DEFAULT = 3;
+const VOICEVOX_RUN_ARGS = ['--host', VOICEVOX_HOST, '--port', String(VOICEVOX_PORT)];
+
+function voicevoxRunPath() {
+  return path.join(VOICEVOX_DIR, 'linux-cpu-x64', 'run');
+}
+
+/** VOICEVOX ENGINE の展開済みバイナリがあるか */
+function isVoicevoxInstalled() {
+  try {
+    return fs.existsSync(voicevoxRunPath());
+  } catch (_) {
+    return false;
+  }
+}
+
+function voicevoxBaseUrl() {
+  return `http://${VOICEVOX_HOST}:${VOICEVOX_PORT}`;
+}
+
+const voicevoxStatus = {
+  phase: 'idle', // idle | downloading | extracting | starting | ready | error
+  message: '未インストール',
+  progress: null, // 0..100（ダウンロード時のみ）
+  error: null,
+  engineVersion: null,
+  installed: false,
+  running: false,
+  speaker: VOICEVOX_SPEAKER_DEFAULT,
+};
+let voicevoxProc = null;
+let voicevoxInstalling = false;
+
+function setVoicevoxStatus(patch) {
+  Object.assign(voicevoxStatus, patch);
+  voicevoxStatus.installed = isVoicevoxInstalled();
+  if (voicevoxStatus.installed && voicevoxStatus.phase === 'idle') {
+    voicevoxStatus.message = 'インストール済み（停止中）';
+  }
+  return voicevoxStatus;
+}
+
+/** ENGINE が応答するか（短時間タイムアウトで確認） */
+async function isVoicevoxRunning(timeoutMs) {
+  const ms = Number.isFinite(timeoutMs) ? timeoutMs : 3000;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(`${voicevoxBaseUrl()}/version`, { signal: ctl.signal });
+    if (!r.ok) return false;
+    return true;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** ENGINE の起動を待つ（/version が 200 を返すまでポーリング） */
+async function waitForVoicevoxReady(timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 120000);
+  for (;;) {
+    if (await isVoicevoxRunning(3000)) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+function ensure7z() {
+  return new Promise((resolve, reject) => {
+    exec('command -v 7z >/dev/null 2>&1 || 7z i >/dev/null 2>&1', (err) => {
+      if (!err) return resolve();
+      // 未導入環境向けフォールバック（提供パッケージ名は 7zip）
+      exec('apt-get update && apt-get install -y 7zip', { timeout: 5 * 60 * 1000 }, (e2) => {
+        if (e2) return reject(new Error('7z が無く自動導入にも失敗しました'));
+        resolve();
+      });
+    });
+  });
+}
+
+function downloadFile(url, destPath, onProgress) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+      const r = await fetch(url);
+      if (!r.ok || !r.body) {
+        return reject(new Error(`ダウンロードに失敗しました (HTTP ${r.status})`));
+      }
+      const total = Number(r.headers.get('content-length')) || 0;
+      let done = 0;
+      const ws = fs.createWriteStream(destPath);
+      const reader = r.body.getReader();
+      const pump = async () => {
+        for (;;) {
+          const { done: end, value } = await reader.read();
+          if (end) break;
+          done += value.length;
+          if (!ws.write(Buffer.from(value))) {
+            await new Promise((res) => ws.once('drain', res));
+          }
+          if (total > 0 && onProgress) {
+            try { onProgress(Math.min(100, Math.round((done / total) * 100))); } catch (_) {}
+          }
+        }
+        ws.end(() => resolve({ done, total }));
+      };
+      ws.on('error', reject);
+      await pump();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+function extractArchive(archivePath) {
+  return new Promise((resolve, reject) => {
+    execFile('7z', ['x', archivePath, `-o${VOICEVOX_DIR}`, '-y'], { timeout: 20 * 60 * 1000 }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(`展開に失敗しました: ${String((err && err.message) || err)} ${String(stderr || '').slice(0, 500)}`));
+      resolve(stdout);
+    });
+  });
+}
+
+function resolveVoicevoxAsset(releaseJson) {
+  const tag = String((releaseJson && releaseJson.tag_name) || '').trim();
+  const ver = tag.replace(/^v/, '') || VOICEVOX_ENGINE_VERSION_FALLBACK;
+  const assets = (releaseJson && releaseJson.assets) || [];
+  const hit = assets.find((a) => /linux-cpu-x64.*7z\.001$/.test(String((a && a.name) || '')));
+  if (hit && hit.browser_download_url) {
+    return { version: ver, url: hit.browser_download_url, name: hit.name };
+  }
+  // フォールバック: 命名規則から直接 URL を組み立てる
+  const name = `voicevox_engine-linux-cpu-x64-${ver}.7z.001`;
+  return {
+    version: ver,
+    url: `https://github.com/VOICEVOX/voicevox_engine/releases/download/${ver}/${name}`,
+    name,
+  };
+}
+
+/** VOICEVOX ENGINE プロセスを起動する（既起動なら何もしない） */
+async function startVoicevox() {
+  if (voicevoxProc && voicevoxProc.exitCode == null) {
+    if (await isVoicevoxRunning(3000)) {
+      setVoicevoxStatus({ phase: 'ready', message: '起動済み', error: null, running: true });
+      return voicevoxStatus;
+    }
+    try { voicevoxProc.kill(); } catch (_) {}
+    voicevoxProc = null;
+  }
+  if (!isVoicevoxInstalled()) {
+    throw new Error('VOICEVOX がインストールされていません（先にインストールしてください）');
+  }
+  setVoicevoxStatus({ phase: 'starting', message: 'VOICEVOX を起動しています…', error: null });
+  const runPath = voicevoxRunPath();
+  try {
+    fs.chmodSync(runPath, 0o755);
+  } catch (_) {}
+  voicevoxProc = spawn(runPath, VOICEVOX_RUN_ARGS, {
+    cwd: path.dirname(runPath),
+    stdio: 'ignore',
+    detached: true,
+  });
+  if (voicevoxProc && voicevoxProc.unref) voicevoxProc.unref();
+  if (voicevoxProc) {
+    voicevoxProc.on('exit', () => {
+      if (voicevoxProc && voicevoxProc.exitCode != null) voicevoxProc = null;
+      if (voicevoxStatus.phase === 'ready') {
+        setVoicevoxStatus({ phase: 'idle', message: '停止しました', running: false });
+      }
+    });
+  }
+  const ok = await waitForVoicevoxReady(120000);
+  if (!ok) {
+    setVoicevoxStatus({ phase: 'error', message: '起動に失敗しました', error: 'ENGINE の起動確認がタイムアウトしました', running: false });
+    throw new Error('ENGINE の起動確認がタイムアウトしました');
+  }
+  // バージョン取得（表示用。失敗しても起動は継続）
+  let engineVersion = null;
+  try {
+    const r = await fetch(`${voicevoxBaseUrl()}/version`);
+    if (r.ok) engineVersion = (await r.json().catch(() => null)) ?? null;
+    if (typeof engineVersion !== 'string') engineVersion = String(engineVersion ?? '');
+  } catch (_) {}
+  setVoicevoxStatus({ phase: 'ready', message: 'VOICEVOX で読み上げ中（ずんだもん）', error: null, running: true, engineVersion });
+  return voicevoxStatus;
+}
+
+/** VOICEVOX ENGINE プロセスを停止する */
+function stopVoicevox() {
+  if (voicevoxProc && voicevoxProc.exitCode == null) {
+    try { voicevoxProc.kill('SIGTERM'); } catch (_) {}
+  }
+  voicevoxProc = null;
+  setVoicevoxStatus({ phase: 'idle', message: isVoicevoxInstalled() ? 'インストール済み（停止中）' : '未インストール', running: false, progress: null });
+  return voicevoxStatus;
+}
+
+/** ダウンロード→展開→起動→設定切替までを背景実行する（二重起動防止付き） */
+async function installVoicevoxBackground() {
+  if (voicevoxInstalling) return voicevoxStatus;
+  voicevoxInstalling = true;
+  try {
+    // 既に展開済みなら起動だけ行う
+    if (isVoicevoxInstalled()) {
+      await startVoicevox();
+      settings = normalizeSettings({ ttsEngine: 'voicevox' }, settings);
+      saveSettings();
+      return voicevoxStatus;
+    }
+    setVoicevoxStatus({ phase: 'downloading', message: 'VOICEVOX をダウンロードしています…（約1.8GB）', progress: 0, error: null });
+    let release = null;
+    try {
+      const r = await fetch('https://api.github.com/repos/VOICEVOX/voicevox_engine/releases/latest', {
+        headers: { 'User-Agent': BROWSER_UA, Accept: 'application/vnd.github+json' },
+      });
+      if (r.ok) release = await r.json();
+    } catch (_) {}
+    const asset = resolveVoicevoxAsset(release);
+    const dest = path.join(VOICEVOX_DIR, asset.name);
+    await downloadFile(asset.url, dest, (p) => {
+      setVoicevoxStatus({ progress: p, message: `VOICEVOX をダウンロードしています… ${p}%` });
+    });
+    setVoicevoxStatus({ phase: 'extracting', message: 'VOICEVOX を展開しています…（数分かかります）', progress: null });
+    await ensure7z();
+    await extractArchive(dest);
+    try { fs.unlinkSync(dest); } catch (_) {}
+    if (!isVoicevoxInstalled()) {
+      throw new Error('展開後に実行ファイルが見つかりませんでした');
+    }
+    await startVoicevox();
+    // 完了したら自動で VOICEVOX 読み上げに切り替える
+    settings = normalizeSettings({ ttsEngine: 'voicevox' }, settings);
+    saveSettings();
+    return voicevoxStatus;
+  } catch (e) {
+    const msg = String((e && e.message) || e);
+    setVoicevoxStatus({ phase: 'error', message: 'インストールに失敗しました', error: msg, running: false });
+    throw e;
+  } finally {
+    voicevoxInstalling = false;
+  }
+}
+
+/** テキストを VOICEVOX で合成して WAV Buffer を返す（プロキシ用） */
+async function synthesizeVoicevox(text, speaker) {
+  const spk = Number.isFinite(Number(speaker)) ? Number(speaker) : (settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT);
+  const q = new URLSearchParams({ text: String(text), speaker: String(spk) });
+  const aq = await fetch(`${voicevoxBaseUrl()}/audio_query?${q.toString()}`, { method: 'POST' });
+  if (!aq.ok) throw new Error(`audio_query HTTP ${aq.status}`);
+  const queryJson = await aq.json();
+  // 読み上げ速度を設定値に寄せる（VOICEVOX の speedScale は概ね 0.5〜2.0）
+  queryJson.speedScale = Math.max(0.5, Math.min(2.0, Number(settings.ttsRate) || 1.0));
+  const syn = await fetch(`${voicevoxBaseUrl()}/synthesis?speaker=${encodeURIComponent(String(spk))}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(queryJson),
+  });
+  if (!syn.ok) throw new Error(`synthesis HTTP ${syn.status}`);
+  return Buffer.from(await syn.arrayBuffer());
 }
 
 // ---------- 緊急地震速報 (EEW / Wolfx Open API WebSocket) ----------
@@ -2637,6 +2921,75 @@ function handleSettingsUpdate(req, res) {
 app.put('/api/settings', handleSettingsUpdate);
 app.post('/api/settings', handleSettingsUpdate);
 
+// ---- VOICEVOX API（v2.5.0。install/stop は制御系と同じく DISABLE_CONTROL=1 で無効化） ----
+app.get('/api/voicevox/status', async (req, res) => {
+  const installed = isVoicevoxInstalled();
+  let running = false;
+  try {
+    running = await isVoicevoxRunning(2000);
+  } catch (_) {}
+  voicevoxStatus.installed = installed;
+  voicevoxStatus.running = running;
+  if (voicevoxInstalling) {
+    return res.json({ ok: true, installing: true, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, ...voicevoxStatus });
+  }
+  if (running && voicevoxStatus.phase !== 'ready') {
+    voicevoxStatus.phase = 'ready';
+    voicevoxStatus.message = 'VOICEVOX で読み上げ中（ずんだもん）';
+  }
+  if (!running && voicevoxStatus.phase === 'ready') {
+    voicevoxStatus.phase = 'idle';
+    voicevoxStatus.message = installed ? 'インストール済み（停止中）' : '未インストール';
+  }
+  res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, ...voicevoxStatus });
+});
+
+app.post('/api/voicevox/install', (req, res) => {
+  if (!controlEnabled()) {
+    return res.status(403).json({ ok: false, error: '制御APIは無効化されています (DISABLE_CONTROL=1)' });
+  }
+  if (voicevoxInstalling) {
+    return res.json({ ok: true, message: 'インストール処理中です', status: voicevoxStatus });
+  }
+  // 背景でダウンロード→展開→起動（応答は待たない。進捗は status ポーリングで確認）
+  installVoicevoxBackground().catch((e) => {
+    console.error('voicevox install failed:', String((e && e.message) || e));
+  });
+  res.json({ ok: true, message: 'VOICEVOX のインストールを開始しました', status: voicevoxStatus });
+});
+
+app.post('/api/voicevox/stop', (req, res) => {
+  if (!controlEnabled()) {
+    return res.status(403).json({ ok: false, error: '制御APIは無効化されています (DISABLE_CONTROL=1)' });
+  }
+  stopVoicevox();
+  // 停止したらブラウザ読み上げに戻す（既存機能を壊さない）
+  settings = normalizeSettings({ ttsEngine: 'browser' }, settings);
+  saveSettings();
+  res.json({ ok: true, message: 'VOICEVOX を停止しブラウザ読み上げに戻しました', status: voicevoxStatus, settings });
+});
+
+// TTS プロキシ: フロントはテキストを送るだけで WAV を受け取れる（CORS・公開ポート回避）
+app.post('/api/tts', async (req, res) => {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const text = String(body.text != null ? body.text : '').trim();
+  if (!text) {
+    return res.status(400).json({ ok: false, error: 'text を指定してください', fallback: 'browser' });
+  }
+  const speakerRaw = body.speaker != null ? parseInt(body.speaker, 10) : (settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT);
+  const speaker = Number.isFinite(speakerRaw) ? speakerRaw : VOICEVOX_SPEAKER_DEFAULT;
+  // 長文は先頭だけ合成する（ENGINE 負荷・応答時間の上限）
+  const clipped = text.slice(0, 1000);
+  try {
+    const wav = await synthesizeVoicevox(clipped, speaker);
+    res.set('Content-Type', 'audio/wav');
+    res.set('Cache-Control', 'no-store');
+    return res.send(wav);
+  } catch (e) {
+    return res.status(503).json({ ok: false, error: 'VOICEVOX が利用できません: ' + String((e && e.message) || e), fallback: 'browser' });
+  }
+});
+
 // ---- フィード エクスポート / インポート ----
 app.get('/api/feeds/export', (req, res) => {
   res.json({
@@ -2971,6 +3324,10 @@ async function main() {
   applyIntervalSettings();
   loadStore();
   startEewWatcher();
+  // VOICEVOX 読み上げ設定なら ENGINE を自動起動する（失敗してもサーバーは起動する）
+  if (settings.ttsEngine === 'voicevox' && isVoicevoxInstalled()) {
+    startVoicevox().catch((e) => console.error('voicevox autostart failed:', String((e && e.message) || e)));
+  }
   // 起動直後に1回取得（失敗してもサーバーは起動する）
   await fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
   scheduleFetch();
@@ -3094,4 +3451,19 @@ module.exports = {
   similarity: titleSimilarity,
   clusterItems: assignGroups,
   extractMeta: extractArticleDescription,
+  // VOICEVOX（ずんだもん読み上げ, v2.5.0）
+  VOICEVOX_PORT,
+  VOICEVOX_HOST,
+  VOICEVOX_DIR,
+  VOICEVOX_SPEAKER_DEFAULT,
+  VOICEVOX_ENGINE_VERSION_FALLBACK,
+  get voicevoxStatus() { return voicevoxStatus; },
+  isVoicevoxInstalled,
+  isVoicevoxRunning,
+  startVoicevox,
+  stopVoicevox,
+  installVoicevoxBackground,
+  synthesizeVoicevox,
+  resolveVoicevoxAsset,
+  voicevoxBaseUrl,
 };

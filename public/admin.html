@@ -148,6 +148,17 @@
   <div><button class="primary" type="submit">設定を保存する</button></div>
 </form>
 
+<h2 style="font-size:16px;margin:24px 0 10px;">VOICEVOX読み上げ（ずんだもん）</h2>
+<div class="add" id="voicevoxBox">
+  <div id="vvStatus" style="font-size:13px;color:#bbb;">VOICEVOXの状態を確認しています…</div>
+  <div id="vvProgress" style="font-size:13px;color:#8ab4ff;min-height:1.5em;"></div>
+  <div class="row" style="margin-bottom:0;">
+    <button id="vvInstallBtn" class="primary" type="button">VOICEVOXを使用する</button>
+    <button id="vvBrowserBtn" type="button">ブラウザ読み上げに戻す</button>
+  </div>
+  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、読み上げがずんだもん（ノーマル）に切り替わります。使えない場合はブラウザ読み上げにフォールバックします。</div>
+</div>
+
 <h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
 <form class="add" id="weatherForm">
   <label>予報地域（トップ画面ヘッダーの天気表示に使用・気象庁の予報）
@@ -527,7 +538,86 @@ document.getElementById('importForm').addEventListener('submit', async (e) => {
   }
 });
 
+// ---- VOICEVOX（ずんだもん読み上げ, v2.5.0） ----
+let vvPollTimer = null;
+function vvText(s) {
+  if (!s) return 'VOICEVOXの状態を取得できませんでした。';
+  const engine = s.ttsEngine === 'voicevox' ? '現在の読み上げ: VOICEVOX（ずんだもん）' : '現在の読み上げ: ブラウザ標準';
+  const base = s.phase === 'ready' ? 'VOICEVOX起動中'
+    : s.phase === 'downloading' ? 'ダウンロード中'
+    : s.phase === 'extracting' ? '展開中'
+    : s.phase === 'starting' ? '起動中'
+    : s.phase === 'error' ? 'エラー'
+    : s.installed ? 'インストール済み（停止中）' : '未インストール';
+  let msg = engine + ' / 状態: ' + base;
+  if (s.message) msg += '（' + s.message + '）';
+  if (s.error) msg += ' エラー: ' + s.error;
+  return msg;
+}
+async function loadVoicevoxStatus() {
+  const el = document.getElementById('vvStatus');
+  const pr = document.getElementById('vvProgress');
+  try {
+    const res = await fetch('/api/voicevox/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const s = await res.json();
+    if (el) el.textContent = vvText(s);
+    if (pr) {
+      if (s.phase === 'downloading' && s.progress != null) {
+        pr.textContent = '進捗: ' + s.progress + '%';
+      } else if (s.phase === 'downloading' || s.phase === 'extracting' || s.phase === 'starting') {
+        pr.textContent = '処理中… このままお待ちください（数分かかります）。';
+      } else if (s.phase === 'ready' && s.ttsEngine === 'voicevox') {
+        pr.textContent = 'VOICEVOX で読み上げ中です（ずんだもん ノーマル）。';
+      } else {
+        pr.textContent = '';
+      }
+    }
+    // 処理中は2秒ごとにポーリングし、完了したら設定表示を更新する
+    const busy = s.installing || s.phase === 'downloading' || s.phase === 'extracting' || s.phase === 'starting';
+    if (busy && !vvPollTimer) {
+      vvPollTimer = setInterval(loadVoicevoxStatus, 2000);
+    } else if (!busy && vvPollTimer) {
+      clearInterval(vvPollTimer);
+      vvPollTimer = null;
+      loadSettings();
+    }
+  } catch (e) {
+    if (el) el.textContent = 'VOICEVOXの状態を取得できませんでした: ' + e.message;
+  }
+}
+document.getElementById('vvInstallBtn').addEventListener('click', async () => {
+  showMsg('');
+  const btn = document.getElementById('vvInstallBtn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch('/api/voicevox/install', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    showMsg('VOICEVOX のインストールを開始しました。進捗は下の状態表示で確認できます。', 'ok');
+    loadVoicevoxStatus();
+    if (!vvPollTimer) vvPollTimer = setInterval(loadVoicevoxStatus, 2000);
+  } catch (e2) {
+    showMsg('VOICEVOX のインストール開始に失敗しました: ' + e2.message, 'err');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+});
+document.getElementById('vvBrowserBtn').addEventListener('click', async () => {
+  showMsg('');
+  try {
+    const res = await fetch('/api/voicevox/stop', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    showMsg('ブラウザ読み上げに戻しました。', 'ok');
+    loadVoicevoxStatus();
+  } catch (e2) {
+    showMsg('切り替えに失敗しました: ' + e2.message, 'err');
+  }
+});
+
 loadSettings();
+loadVoicevoxStatus();
 loadAll().catch((e) => {
   elRows.innerHTML = '<tr><td colspan="7">読み込みに失敗しました: ' + esc(e.message) + '</td></tr>';
 });
