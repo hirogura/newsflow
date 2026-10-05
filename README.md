@@ -148,6 +148,9 @@ sudo pacman -S speech-dispatcher espeak-ng
 インストール進捗は画面に表示され、完了すると自動で VOICEVOX 読み上げに切り替わります。
 
 - 既定話者はずんだもん（ノーマル, speaker id = `3`）。
+  話者は「ずんだもん」「四国めたん」「雀松朱司」「春日部つむぎ」「青山龍星」「もち子さん」「No.7」から選択できます。
+  一番右の「順番」ボタン（v2.9.0〜）を押すと、1記事ごとに話者を順番に切り替えながら読み上げます
+  （設定キー `voicevoxRotate` に保持。個別話者を選ぶと順番モードは解除されます）。
 - フロントは `POST /api/tts` にテキストを送り、返ってきた WAV を `Audio` 要素で再生します
   （ブラウザから直接 `127.0.0.1:50021` を叩かないサーバープロキシ方式のため CORS・公開ポートの心配なし）。
 - VOICEVOX が使えない場合（未インストール・停止・合成失敗）は従来どおりブラウザ TTS にフォールバックします。
@@ -155,7 +158,9 @@ sudo pacman -S speech-dispatcher espeak-ng
 - API: `GET /api/voicevox/status`（状態・進捗ポーリング用）/
   `POST /api/voicevox/install`（制御系と同じく `DISABLE_CONTROL=1` で無効化）/
   `POST /api/voicevox/stop`（停止してブラウザ読み上げに戻す）/
-  `POST /api/tts`（`{ text, speaker }` → `audio/wav`）。
+  `POST /api/tts`（`{ text, speaker }` → `audio/wav`）/
+  `POST /api/voicevox/speaker`（話者切替。個別指定で順番モードは Off）/
+  `POST /api/voicevox/rotate`（`{ rotate: true/false }`・省略時は反転。順番モード切替）。
 - 実体は `voicevox/` 配下に展開されます（`.gitignore` 対象・コミットしません）。
   未導入環境では `7z` が無ければ `apt-get install -y 7zip` で自動導入を試みます。
 - 再起動時は `ttsEngine=voicevox` かつ展開済みなら ENGINE を自動起動します。

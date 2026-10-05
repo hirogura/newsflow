@@ -161,12 +161,13 @@
     <button id="vvSpeakerRyusei" data-speaker="13" type="button">青山龍星</button>
     <button id="vvSpeakerMochiko" data-speaker="20" type="button">もち子さん</button>
     <button id="vvSpeakerNo7" data-speaker="29" type="button">No.7</button>
+    <button id="vvRotateBtn" data-rotate="1" type="button">順番</button>
   </div>
   <div class="row" style="margin-bottom:0;">
     <button id="vvInstallBtn" class="primary" type="button">VOICEVOXを使用する</button>
     <button id="vvBrowserBtn" type="button">ブラウザ読み上げに戻す</button>
   </div>
-  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」「春日部つむぎ」「青山龍星」「もち子さん」「No.7」を切り替えられます。使えない場合はブラウザ読み上げにフォールバックします。</div>
+  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」「春日部つむぎ」「青山龍星」「もち子さん」「No.7」を切り替えられます。「順番」を押すと1記事ごとに話者を順番に切り替えながら読み上げます（もう一度押すと解除）。使えない場合はブラウザ読み上げにフォールバックします。</div>
 </div>
 
 <h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
@@ -449,7 +450,7 @@ async function loadSettings() {
     }
     if (s.weatherArea != null) document.getElementById('sWeather').value = String(s.weatherArea);
     if (s.voicevoxSpeaker != null && typeof updateVvSpeakerButtons === 'function') {
-      try { updateVvSpeakerButtons(Number(s.voicevoxSpeaker)); } catch (_) {}
+      try { updateVvSpeakerButtons(Number(s.voicevoxSpeaker), !!s.voicevoxRotate); } catch (_) {}
     }
   } catch (e) { /* 無視 */ }
 }
@@ -574,19 +575,34 @@ function vvCurrentSpeaker(s) {
   const n = Number(raw);
   return Number.isFinite(n) ? n : 3;
 }
-function updateVvSpeakerButtons(speaker) {
+// 順番モードか（/api/voicevox/status の rotate / 設定の voicevoxRotate のいずれか）
+function vvCurrentRotate(s) {
+  if (!s) return false;
+  const v = s.rotate != null ? s.rotate : s.voicevoxRotate;
+  return !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off' || v == null || v === '');
+}
+function updateVvSpeakerButtons(speaker, rotate) {
   const n = Number(speaker);
+  const rot = !!rotate;
   for (const sp of VV_SPEAKERS) {
     const btn = document.querySelector('#voicevoxBox [data-speaker="' + sp.id + '"]');
     if (!btn) continue;
-    const active = n === sp.id;
+    const active = !rot && n === sp.id;
     btn.classList.toggle('primary', active);
     btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  const rb = document.querySelector('#voicevoxBox [data-rotate="1"]');
+  if (rb) {
+    rb.classList.toggle('primary', rot);
+    rb.setAttribute('aria-pressed', rot ? 'true' : 'false');
   }
 }
 function vvText(s) {
   if (!s) return 'VOICEVOXの状態を取得できませんでした。';
-  const engine = s.ttsEngine === 'voicevox' ? '現在の読み上げ: VOICEVOX（' + vvSpeakerName(vvCurrentSpeaker(s)) + '）' : '現在の読み上げ: ブラウザ標準';
+  const rot = vvCurrentRotate(s);
+  const engine = s.ttsEngine === 'voicevox'
+    ? '現在の読み上げ: VOICEVOX（' + (rot ? '順番に切替' : vvSpeakerName(vvCurrentSpeaker(s))) + '）'
+    : '現在の読み上げ: ブラウザ標準';
   const base = s.phase === 'ready' ? 'VOICEVOX起動中'
     : s.phase === 'downloading' ? 'ダウンロード中'
     : s.phase === 'extracting' ? '展開中'
@@ -606,14 +622,14 @@ async function loadVoicevoxStatus() {
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const s = await res.json();
     if (el) el.textContent = vvText(s);
-    updateVvSpeakerButtons(vvCurrentSpeaker(s));
+    updateVvSpeakerButtons(vvCurrentSpeaker(s), vvCurrentRotate(s));
     if (pr) {
       if (s.phase === 'downloading' && s.progress != null) {
         pr.textContent = '進捗: ' + s.progress + '%';
       } else if (s.phase === 'downloading' || s.phase === 'extracting' || s.phase === 'starting') {
         pr.textContent = '処理中… このままお待ちください（数分かかります）。';
       } else if (s.phase === 'ready' && s.ttsEngine === 'voicevox') {
-        pr.textContent = 'VOICEVOX で読み上げ中です（' + vvSpeakerName(vvCurrentSpeaker(s)) + ' ノーマル）。';
+        pr.textContent = 'VOICEVOX で読み上げ中です（' + (vvCurrentRotate(s) ? '順番に切替' : vvSpeakerName(vvCurrentSpeaker(s)) + ' ノーマル') + '）。';
       } else {
         pr.textContent = '';
       }
@@ -642,7 +658,7 @@ async function setVoicevoxSpeaker(id) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-    updateVvSpeakerButtons(data.speaker);
+    updateVvSpeakerButtons(data.speaker, data.rotate != null ? data.rotate : (data.settings && data.settings.voicevoxRotate));
     showMsg('話者を' + vvSpeakerName(data.speaker) + 'に切り替えました。', 'ok');
     loadVoicevoxStatus();
   } catch (e2) {
@@ -652,6 +668,32 @@ async function setVoicevoxSpeaker(id) {
 for (const sp of VV_SPEAKERS) {
   const btn = document.querySelector('#voicevoxBox [data-speaker="' + sp.id + '"]');
   if (btn) btn.addEventListener('click', () => setVoicevoxSpeaker(sp.id));
+}
+// 順番モード（v2.9.0）: もう一度押すと解除（トグル動作）。個別話者を選ぶと順番は Off になる。
+async function setVoicevoxRotate(on) {
+  showMsg('');
+  try {
+    const res = await fetch('/api/voicevox/rotate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rotate: !!on }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+    const rot = !!(data.rotate != null ? data.rotate : (data.settings && data.settings.voicevoxRotate));
+    updateVvSpeakerButtons(data.speaker, rot);
+    showMsg(rot ? '順番モードにしました（1記事ごとに話者を順番に切り替えます）。' : '順番モードを解除しました。', 'ok');
+    loadVoicevoxStatus();
+  } catch (e2) {
+    showMsg('順番モードの切り替えに失敗しました: ' + e2.message, 'err');
+  }
+}
+{
+  const rbtn = document.querySelector('#voicevoxBox [data-rotate="1"]');
+  if (rbtn) rbtn.addEventListener('click', () => {
+    const active = rbtn.getAttribute('aria-pressed') === 'true';
+    setVoicevoxRotate(!active);
+  });
 }
 document.getElementById('vvInstallBtn').addEventListener('click', async () => {
   showMsg('');

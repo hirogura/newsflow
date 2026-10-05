@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.8.0';
+const VERSION = '2.9.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -51,6 +51,7 @@ const DEFAULT_SETTINGS = {
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
   ttsEngine: 'browser', // 読み上げエンジン（'browser' / 'voicevox'）
   voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3。2=四国めたん / 52=雀松朱司 / 8=春日部つむぎ / 13=青山龍星 / 20=もち子さん / 29=No.7）
+  voicevoxRotate: false, // true のとき1記事ごとに VOICEVOX_SPEAKERS の順で話者を切り替える（v2.9.0「順番」）
   theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
@@ -115,6 +116,10 @@ function normalizeSettings(input, base) {
   if (src.voicevoxSpeaker !== undefined) {
     const n = parseInt(src.voicevoxSpeaker, 10);
     s.voicevoxSpeaker = Number.isFinite(n) && n >= 0 && n <= 100 ? n : b.voicevoxSpeaker;
+  }
+  if (src.voicevoxRotate !== undefined) {
+    const v = src.voicevoxRotate;
+    s.voicevoxRotate = !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off');
   }
   if (src.theme !== undefined) {
     const t = String(src.theme).toLowerCase();
@@ -232,6 +237,21 @@ function voicevoxSpeakerName(speaker) {
   if (hit) return hit.name;
   return Number.isFinite(n) ? `ID ${n}` : 'ずんだもん';
 }
+/**
+ * 順番モード（v2.9.0）で再生順 pos に対応する話者IDを返す（純粋関数）。
+ * VOICEVOX_SPEAKERS の並びを1記事ごとに巡回する。負数・巨大数でも破綻しない。
+ */
+function voicevoxSpeakerForIndex(pos) {
+  const len = VOICEVOX_SPEAKERS.length;
+  if (len === 0) return VOICEVOX_SPEAKER_DEFAULT;
+  const i = Number.isFinite(Number(pos)) ? Math.trunc(Number(pos)) : 0;
+  return VOICEVOX_SPEAKERS[((i % len) + len) % len].id;
+}
+/** 現在の読み上げ表示名（順番モード中は「順番に切替」。メッセージ表示用） */
+function voicevoxCurrentLabel() {
+  if (settings && settings.voicevoxRotate) return '順番に切替';
+  return voicevoxSpeakerName(settings ? settings.voicevoxSpeaker : VOICEVOX_SPEAKER_DEFAULT);
+}
 const VOICEVOX_RUN_ARGS = ['--host', VOICEVOX_HOST, '--port', String(VOICEVOX_PORT)];
 
 function voicevoxRunPath() {
@@ -260,6 +280,7 @@ const voicevoxStatus = {
   installed: false,
   running: false,
   speaker: VOICEVOX_SPEAKER_DEFAULT,
+  rotate: false, // 順番モード（v2.9.0。settings.voicevoxRotate と連動）
 };
 let voicevoxProc = null;
 let voicevoxInstalling = false;
@@ -416,7 +437,7 @@ async function startVoicevox() {
     if (r.ok) engineVersion = (await r.json().catch(() => null)) ?? null;
     if (typeof engineVersion !== 'string') engineVersion = String(engineVersion ?? '');
   } catch (_) {}
-  setVoicevoxStatus({ phase: 'ready', message: `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`, error: null, running: true, engineVersion });
+  setVoicevoxStatus({ phase: 'ready', message: `VOICEVOX で読み上げ中（${voicevoxCurrentLabel()}）`, error: null, running: true, engineVersion });
   return voicevoxStatus;
 }
 
@@ -2951,22 +2972,24 @@ app.get('/api/voicevox/status', async (req, res) => {
   } catch (_) {}
   voicevoxStatus.installed = installed;
   voicevoxStatus.running = running;
+  voicevoxStatus.rotate = !!settings.voicevoxRotate;
   if (voicevoxInstalling) {
-    return res.json({ ok: true, installing: true, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
+    return res.json({ ok: true, installing: true, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, rotate: !!settings.voicevoxRotate, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
   }
   if (running && voicevoxStatus.phase !== 'ready') {
     voicevoxStatus.phase = 'ready';
-    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`;
+    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxCurrentLabel()}）`;
   }
   if (!running && voicevoxStatus.phase === 'ready') {
     voicevoxStatus.phase = 'idle';
     voicevoxStatus.message = installed ? 'インストール済み（停止中）' : '未インストール';
   }
-  res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
+  res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, rotate: !!settings.voicevoxRotate, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
 });
 
 // 話者切替: 管理画面の話者ボタン用。
 // /api/settings でも変更できるが、こちらは話者に特化した短縮API。
+// 個別話者を選ぶと順番モードは Off になる（順番モードは POST /api/voicevox/rotate で On）。
 app.post('/api/voicevox/speaker', (req, res) => {
   const body = (req.body && typeof req.body === 'object') ? req.body : {};
   const raw = body.speaker != null ? body.speaker : body.voicevoxSpeaker;
@@ -2974,13 +2997,32 @@ app.post('/api/voicevox/speaker', (req, res) => {
   if (!Number.isFinite(n) || !VOICEVOX_SPEAKER_IDS.includes(n)) {
     return res.status(400).json({ ok: false, error: 'speaker は 3（ずんだもん）・2（四国めたん）・52（雀松朱司）・8（春日部つむぎ）・13（青山龍星）・20（もち子さん）・29（No.7）のいずれかを指定してください' });
   }
-  settings = normalizeSettings({ voicevoxSpeaker: n }, settings);
+  settings = normalizeSettings({ voicevoxSpeaker: n, voicevoxRotate: false }, settings);
   saveSettings();
   voicevoxStatus.speaker = settings.voicevoxSpeaker;
+  voicevoxStatus.rotate = false;
   if (voicevoxStatus.phase === 'ready') {
-    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxSpeakerName(settings.voicevoxSpeaker)}）`;
+    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxCurrentLabel()}）`;
   }
-  res.json({ ok: true, speaker: settings.voicevoxSpeaker, speakerName: voicevoxSpeakerName(settings.voicevoxSpeaker), speakers: VOICEVOX_SPEAKERS, settings });
+  res.json({ ok: true, speaker: settings.voicevoxSpeaker, speakerName: voicevoxSpeakerName(settings.voicevoxSpeaker), rotate: false, speakers: VOICEVOX_SPEAKERS, settings });
+});
+
+// 順番モード切替（v2.9.0）: 管理画面の「順番」ボタン用。
+// On のときサイネージ画面が1記事ごとに VOICEVOX_SPEAKERS の順で話者を切り替える。
+// { rotate: true/false }（省略時は現在の On/Off を反転する）。
+app.post('/api/voicevox/rotate', (req, res) => {
+  const body = (req.body && typeof req.body === 'object') ? req.body : {};
+  const raw = body.rotate != null ? body.rotate : body.voicevoxRotate;
+  const on = raw == null ? !settings.voicevoxRotate
+    : !(raw === false || raw === 0 || raw === 'false' || raw === '0' || raw === 'off');
+  settings = normalizeSettings({ voicevoxRotate: on }, settings);
+  saveSettings();
+  voicevoxStatus.speaker = settings.voicevoxSpeaker;
+  voicevoxStatus.rotate = !!settings.voicevoxRotate;
+  if (voicevoxStatus.phase === 'ready') {
+    voicevoxStatus.message = `VOICEVOX で読み上げ中（${voicevoxCurrentLabel()}）`;
+  }
+  res.json({ ok: true, rotate: !!settings.voicevoxRotate, rotateName: '順番に切替', speaker: settings.voicevoxSpeaker, speakers: VOICEVOX_SPEAKERS, settings });
 });
 
 app.post('/api/voicevox/install', (req, res) => {
@@ -3498,6 +3540,7 @@ module.exports = {
   VOICEVOX_SPEAKERS,
   VOICEVOX_SPEAKER_IDS,
   voicevoxSpeakerName,
+  voicevoxSpeakerForIndex,
   VOICEVOX_ENGINE_VERSION_FALLBACK,
   get voicevoxStatus() { return voicevoxStatus; },
   isVoicevoxInstalled,

@@ -366,8 +366,14 @@ let ttsEnabled = true;
 let ttsRate = 1.2;
 // VOICEVOX 読み上げ（v2.6.0）: 'browser'（既定・Web Speech API）/ 'voicevox'（ずんだもん/四国めたん/雀松朱司/春日部つむぎ/青山龍星/もち子さん/No.7）
 // v2.7.0: VOICEVOX 指定時は次の記事の音声を再生中に先読み（プリフェッチ）し、記事間の無音区間を短縮する
+// v2.9.0: voicevoxRotate が true のときは1記事ごとに VOICEVOX_ROTATION の順で話者を切り替える（管理画面の「順番」）
 let ttsEngine = 'browser';
 let voicevoxSpeaker = 3;
+let voicevoxRotate = false;
+// 順番モードの巡回順（server.js の VOICEVOX_SPEAKERS と同順）
+const VOICEVOX_ROTATION = [3, 2, 52, 8, 13, 20, 29];
+// 順番モードで次に使う位置（再生開始時に 0 へ戻す。1記事読むごとに +1）
+let voicevoxRotatePos = 0;
 let voicevoxAudio = null;
 // 先読みキャッシュ: key（話者ID + 読み上げ文）-> WAV の object URL。再生直後に次記事分を裏で合成する
 let voicevoxCache = new Map();
@@ -651,6 +657,7 @@ async function loadSettings() {
     if (Number.isFinite(Number(s.ttsRate))) ttsRate = Number(s.ttsRate);
     ttsEngine = s.ttsEngine === 'voicevox' ? 'voicevox' : 'browser';
     if (Number.isFinite(Number(s.voicevoxSpeaker))) voicevoxSpeaker = Number(s.voicevoxSpeaker);
+    voicevoxRotate = !(s.voicevoxRotate === false || s.voicevoxRotate === 0 || s.voicevoxRotate === 'false' || s.voicevoxRotate === '0' || s.voicevoxRotate === 'off' || s.voicevoxRotate == null || s.voicevoxRotate === '');
     if (s.theme === 'light' || s.theme === 'dark' || s.theme === 'light-modern') applyTheme(s.theme);
   } catch (e) { /* 既定値で継続 */ }
 }
@@ -872,7 +879,7 @@ function buildSpeakText(title, extra, link) {
   return t + (b ? '。' + b : '');
 }
 
-function speak(text, onend) {
+function speak(text, onend, vvSpeaker) {
   showCurrent();
   if (paused) { speaking = false; return; }
   // 読み上げ Off の場合は発話せず一定時間表示して次へ
@@ -884,7 +891,7 @@ function speak(text, onend) {
   // VOICEVOX 指定時はサーバープロキシ経由の WAV 再生を試みる。
   // 使えない場合は従来どおりブラウザ TTS にフォールバックする。
   if (ttsEngine === 'voicevox') {
-    speakVoicevox(text, onend);
+    speakVoicevox(text, onend, vvSpeaker);
     return;
   }
   speakBrowser(text, onend);
@@ -947,6 +954,25 @@ function fetchVoicevoxAudio(text, speaker) {
   voicevoxPending.set(key, p);
   return p;
 }
+// 順番モード用: 再生順 pos に対応する話者ID（VOICEVOX_ROTATION を巡回）
+function voicevoxRotatedSpeaker(pos) {
+  const n = VOICEVOX_ROTATION.length;
+  if (n === 0) return voicevoxSpeaker;
+  const i = Number.isFinite(Number(pos)) ? Math.trunc(Number(pos)) : 0;
+  return VOICEVOX_ROTATION[((i % n) + n) % n];
+}
+// 今回の記事で使う話者を決める（順番モードなら位置を1つ消費する）
+function nextVoicevoxSpeaker() {
+  if (ttsEngine !== 'voicevox' || !voicevoxRotate) return voicevoxSpeaker;
+  const sp = voicevoxRotatedSpeaker(voicevoxRotatePos);
+  voicevoxRotatePos += 1;
+  return sp;
+}
+// 先読み用: 現在位置から ahead 件先の記事の話者（位置は消費しない）
+function peekVoicevoxSpeaker(ahead) {
+  if (ttsEngine !== 'voicevox' || !voicevoxRotate) return voicevoxSpeaker;
+  return voicevoxRotatedSpeaker(voicevoxRotatePos + ahead - 1);
+}
 // playlist 上の次記事（最大 PREFETCH_AHEAD 件分）の読み上げ文を裏で合成する
 function prefetchVoicevoxAhead() {
   if (ttsEngine !== 'voicevox' || !ttsEnabled || !started || paused) return;
@@ -959,9 +985,10 @@ function prefetchVoicevoxAhead() {
       if (!item) continue;
       const t = buildSpeakText(item.title, item.summary || item.body, item.link);
       if (!t) continue;
-      const key = voicevoxCacheKey(t, voicevoxSpeaker);
+      const sp = peekVoicevoxSpeaker(a);
+      const key = voicevoxCacheKey(t, sp);
       if (voicevoxCache.has(key) || voicevoxPending.has(key)) continue;
-      fetchVoicevoxAudio(t, voicevoxSpeaker).catch(() => {});
+      fetchVoicevoxAudio(t, sp).catch(() => {});
     } catch (e) { /* 先読み失敗は無視（本番再生時に通常取得する） */ }
   }
 }
@@ -994,11 +1021,12 @@ function playVoicevoxUrl(url, text, mySeq, onend) {
     prefetchVoicevoxAhead();
   }
 }
-function speakVoicevox(text, onend) {
+function speakVoicevox(text, onend, vvSpeaker) {
   const mySeq = ++playSeq;
+  const speaker = Number.isFinite(Number(vvSpeaker)) ? Number(vvSpeaker) : voicevoxSpeaker;
   stopVoicevoxAudioOnly();
   try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
-  fetchVoicevoxAudio(text, voicevoxSpeaker).then((url) => {
+  fetchVoicevoxAudio(text, speaker).then((url) => {
     if (mySeq !== playSeq || paused) return;
     playVoicevoxUrl(url, text, mySeq, onend);
   }).catch(() => {
@@ -1135,11 +1163,13 @@ async function playAt(i) {
   } catch (e) {}
   maybeRefreshInBackground();
   speaking = true;
+  // 順番モードならこの記事の話者をローテーションから1つ取り出す
+  const vvSpeaker = nextVoicevoxSpeaker();
   speak(speakText(), () => {
     speaking = false;
     if (paused || !started) return;
     playAt(idx + 1);
-  });
+  }, vvSpeaker);
 }
 
 function jumpTo(i) {
@@ -1324,6 +1354,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
           playlist = retry;
           started = true;
           paused = false;
+          voicevoxRotatePos = 0; // 順番モードは先頭の話者から始める
           elOverlay.style.display = 'none';
           acquireWakeLock();
           lastRefreshAt = Date.now();
@@ -1338,6 +1369,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   }
   started = true;
   paused = false;
+  voicevoxRotatePos = 0; // 順番モードは先頭の話者から始める
   elOverlay.style.display = 'none';
   acquireWakeLock();
   try {
