@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.7.0';
+const VERSION = '2.8.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -50,7 +50,7 @@ const DEFAULT_SETTINGS = {
   ttsEnabled: true, // 読み上げ On/Off
   ttsRate: 1.2, // 読み上げ速度（ALLOWED_RATES のいずれか）
   ttsEngine: 'browser', // 読み上げエンジン（'browser' / 'voicevox'）
-  voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3。2=四国めたん / 52=雀松朱司）
+  voicevoxSpeaker: 3, // VOICEVOX 話者ID（既定: ずんだもん ノーマル=3。2=四国めたん / 52=雀松朱司 / 8=春日部つむぎ / 13=青山龍星 / 20=もち子さん / 29=No.7）
   theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
 };
@@ -212,11 +212,17 @@ const VOICEVOX_ENGINE_VERSION_FALLBACK = process.env.VOICEVOX_VERSION || '0.25.2
 // 既定話者: ずんだもん（ノーマル, speaker id = 3）
 // 選択肢（管理画面のボタンと対応）:
 // - ずんだもん（ノーマル）= 3 / - 四国めたん（ノーマル）= 2 / - 雀松朱司（ノーマル）= 52
+// - 春日部つむぎ（ノーマル）= 8 / - 青山龍星（ノーマル）= 13
+// - もち子さん（ノーマル）= 20 / - No.7（ノーマル）= 29
 const VOICEVOX_SPEAKER_DEFAULT = 3;
 const VOICEVOX_SPEAKERS = [
   { id: 3, name: 'ずんだもん' },
   { id: 2, name: '四国めたん' },
   { id: 52, name: '雀松朱司' },
+  { id: 8, name: '春日部つむぎ' },
+  { id: 13, name: '青山龍星' },
+  { id: 20, name: 'もち子さん' },
+  { id: 29, name: 'No.7' },
 ];
 const VOICEVOX_SPEAKER_IDS = VOICEVOX_SPEAKERS.map((s) => s.id);
 /** 話者IDから表示名を返す（未知IDは `ID <n>` 表記。メッセージ表示用） */
@@ -2959,14 +2965,14 @@ app.get('/api/voicevox/status', async (req, res) => {
   res.json({ ok: true, installing: false, ttsEngine: settings.ttsEngine, speaker: settings.voicevoxSpeaker || VOICEVOX_SPEAKER_DEFAULT, speakers: VOICEVOX_SPEAKERS, ...voicevoxStatus });
 });
 
-// 話者切替: 管理画面の「ずんだもん」「四国めたん」「雀松朱司」ボタン用。
+// 話者切替: 管理画面の話者ボタン用。
 // /api/settings でも変更できるが、こちらは話者に特化した短縮API。
 app.post('/api/voicevox/speaker', (req, res) => {
   const body = (req.body && typeof req.body === 'object') ? req.body : {};
   const raw = body.speaker != null ? body.speaker : body.voicevoxSpeaker;
   const n = parseInt(raw, 10);
   if (!Number.isFinite(n) || !VOICEVOX_SPEAKER_IDS.includes(n)) {
-    return res.status(400).json({ ok: false, error: 'speaker は 2（四国めたん）・3（ずんだもん）・52（雀松朱司）のいずれかを指定してください' });
+    return res.status(400).json({ ok: false, error: 'speaker は 3（ずんだもん）・2（四国めたん）・52（雀松朱司）・8（春日部つむぎ）・13（青山龍星）・20（もち子さん）・29（No.7）のいずれかを指定してください' });
   }
   settings = normalizeSettings({ voicevoxSpeaker: n }, settings);
   saveSettings();

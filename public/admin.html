@@ -157,12 +157,16 @@
     <button id="vvSpeakerZunda" data-speaker="3" type="button">ずんだもん</button>
     <button id="vvSpeakerMetan" data-speaker="2" type="button">四国めたん</button>
     <button id="vvSpeakerAkashi" data-speaker="52" type="button">雀松朱司</button>
+    <button id="vvSpeakerTsumugi" data-speaker="8" type="button">春日部つむぎ</button>
+    <button id="vvSpeakerRyusei" data-speaker="13" type="button">青山龍星</button>
+    <button id="vvSpeakerMochiko" data-speaker="20" type="button">もち子さん</button>
+    <button id="vvSpeakerNo7" data-speaker="29" type="button">No.7</button>
   </div>
   <div class="row" style="margin-bottom:0;">
     <button id="vvInstallBtn" class="primary" type="button">VOICEVOXを使用する</button>
     <button id="vvBrowserBtn" type="button">ブラウザ読み上げに戻す</button>
   </div>
-  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」を切り替えられます。使えない場合はブラウザ読み上げにフォールバックします。</div>
+  <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」「春日部つむぎ」「青山龍星」「もち子さん」「No.7」を切り替えられます。使えない場合はブラウザ読み上げにフォールバックします。</div>
 </div>
 
 <h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
@@ -554,6 +558,10 @@ const VV_SPEAKERS = [
   { id: 3, name: 'ずんだもん' },
   { id: 2, name: '四国めたん' },
   { id: 52, name: '雀松朱司' },
+  { id: 8, name: '春日部つむぎ' },
+  { id: 13, name: '青山龍星' },
+  { id: 20, name: 'もち子さん' },
+  { id: 29, name: 'No.7' },
 ];
 function vvSpeakerName(id) {
   const n = Number(id);
