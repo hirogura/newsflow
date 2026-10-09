@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '3.1.2';
+const VERSION = '3.1.3';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1316,20 +1316,37 @@ function currentBodyMaxChars() {
 }
 
 /**
+ * 過去の重複破損の修復だけを行う純粋関数（v3.1.1 以前の保護なし変換で混入した
+ * 「しましました」「ましました」「でしました」系を正規形に戻す）。
+ * 整形の有無にかかわらず適用でき、冪等（適用済み・正常文には無害）。
+ * v3.1.3: 要約側・起動時キャッシュ healing のために toDesuMasu から分離。
+ * なお「ない→ありません」系は動詞否定と形容詞の区別が正規表現では不可能で
+ * どちらも破壊する（少ありません・食べありません）ため、あえて変換しない（原文維持）。
+ */
+function repairPastDesuMasuDup(s) {
+  let t = String(s == null ? '' : s);
+  if (!t) return t;
+  // 例: わかりましましました→わかりました / 発表しましました→発表しました /
+  // 確認されましました→確認されました / 状態でしましました→状態でした
+  t = t.replace(/(まし)+ました/g, 'ました');
+  t = t.replace(/でし(まし)+た/g, 'でした');
+  return t;
+}
+
+/**
  * ですます調への簡易変換（語尾の言い切りを丁寧語に寄せる）。
  * v3.1.2: 既に丁寧語の部分への重複適用を防ぐ（「ました」「でした」は一時保護し、
- * 「まだ」「ただ」等の「だ」は変換しない）。過去データの破損
- *（ましました→ました、でしました→でした）も先に修復するため、本関数は冪等。
- * なお「ない→ありません」系は動詞否定（しない・食べない・来ない）と
- * 形容詞（少ない・危ない）の区別が正規表現では不可能で、どちらも破壊する
- *（少ありません・食べありません）ため、あえて変換しない（原文維持）。
+ * 「まだ」「ただ」等の「だ」は変換しない）。過去データの破損は repairPastDesuMasuDup
+ * で先に修復するため、本関数は冪等。
+ * v3.1.3 注意: 「しました。」は部分文字列として「した。」を含むため、
+ * 保護なしで /した。/g をかけると「発表しました。」→「発表しましました。」と
+ * 壊れる。保護・修復のどちらも削らないこと（回帰テスト test/freebuff.test.js 参照）。
  */
 function toDesuMasu(s) {
   let t = String(s == null ? '' : s);
   if (!t) return t;
-  // 0. 過去の重複破損を修復（例: わかりましましました→わかりました）
-  t = t.replace(/(まし)+ました/g, 'ました');
-  t = t.replace(/でし(まし)+た/g, 'でした');
+  // 0. 過去の重複破損を修復（v3.1.3: repairPastDesuMasuDup に分離。設定OFF時の healing でも共用）
+  t = repairPastDesuMasuDup(t);
   // 0b. 既存の丁寧語を一時保護（未変換の常体は原文のまま残る）
   const PH_M = '\uE000';
   const PH_D = '\uE001';
@@ -2056,7 +2073,7 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
     let body = extractArticleDescription(html, maxChars, url);
     // 有料壁などでナビ・JSが混入したゴミ本文は破棄し、タイトルのみ読み上げにする
     body = cleanBodyWithLink(body, url);
-    body = maybeFormatFreebuff(body);
+    body = repairPastDesuMasuDup(maybeFormatFreebuff(body));
     // キャッシュ済みの本文より今回の方が長ければ長い方を残す（短い snippet で上書きしない）
     const cached = bodyCache.get(url) || '';
     if (cached) body = pickLongerBody(cached, body);
@@ -2111,7 +2128,7 @@ async function fillMissingBodies(items, { concurrency = 5, limit = 120 } = {}) {
         if (!image && page.image) image = page.image;
       }
       if (body && body !== it.body) {
-        body = maybeFormatFreebuff(body);
+        body = repairPastDesuMasuDup(maybeFormatFreebuff(body));
         it.body = body;
         it.summary = summarizeText(body);
         bodyCache.set(it.link, body);
@@ -2170,8 +2187,10 @@ function loadStore() {
             p,
             raw.store[p].map((e) => {
               // 旧キャッシュに残った有料壁のゴミ本文・残渣は読み込まず、タイトルのみにする
+              // v3.1.3: v3.1.1 以前の保護なし変換で混入した「しましました」系の破損も
+              // 設定の有無にかかわらず修復する（修復だけなら原文の意味は変えない）
               const rawBody = e.body || '';
-              const cleanBody = cleanBodyWithLink(rawBody, e.link);
+              const cleanBody = repairPastDesuMasuDup(cleanBodyWithLink(rawBody, e.link));
               const rawSummary = e.summary || '';
               return {
                 prefecture: e.prefecture,
@@ -2183,7 +2202,7 @@ function loadStore() {
                 pubDate: e.pubDate || null,
                 fetchedAt: e.fetchedAt,
                 body: cleanBody,
-                summary: cleanBodyWithLink(rawSummary, e.link) || (cleanBody ? summarizeText(cleanBody) : ''),
+                summary: repairPastDesuMasuDup(cleanBodyWithLink(rawSummary, e.link)) || (cleanBody ? summarizeText(cleanBody) : ''),
                 image: e.image || '',
               };
             })
@@ -2319,7 +2338,8 @@ function ingestFeedItems(feed, items, fetchedAt) {
           if (dup.link) imageCache.set(dup.link, n.image);
         }
         if (n.body && dup.link) {
-          const merged = pickLongerBody(dup.body, cleanBodyWithLink(n.body, dup.link));
+          // v3.1.3: 過去破損の混ざったキャッシュと混ぜても破損を残さないよう修復する
+          const merged = repairPastDesuMasuDup(pickLongerBody(dup.body, cleanBodyWithLink(n.body, dup.link)));
           if (merged !== dup.body) {
             dup.body = merged;
             dup.summary = summarizeText(merged);
@@ -2455,10 +2475,12 @@ function flatItems() {
       if (!isWithinHours(e, settings.maxAgeHours, nowMs)) continue;
       if (!isFeedEnabledFor(e, enabledIds)) continue;
       // 旧キャッシュ由来のゴミ本文・有料壁残渣が残っていても表示・読み上げに出さない
+      // v3.1.3: 読み上げは summary 優先のため、要約側の過去破損（しましました系）も
+      // 設定の有無にかかわらず修復する。整形ON時はさらに maybeFormat をかける
       const rawBody = e.body || bodyCache.get(e.link) || '';
-      const body = maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link));
+      const body = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link)));
       const rawSummary = e.summary || '';
-      const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
+      const summary = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(rawSummary, e.link))) || summarizeText(body);
       out.push({
         prefecture: e.prefecture || pref,
         title: e.title,
@@ -2540,10 +2562,11 @@ function buildPrefectures() {
       prefecture: pref,
       news: list.map((e) => {
         const g = byKey.get(memberKey(e, pref));
+        // v3.1.3: flatItems と同じく要約側の過去破損も修復する（読み上げは summary 優先のため）
         const rawBody = e.body || bodyCache.get(e.link) || '';
-        const body = maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link));
+        const body = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link)));
         const rawSummary = e.summary || '';
-        const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
+        const summary = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(rawSummary, e.link))) || summarizeText(body);
         const image = e.image || imageCache.get(e.link) || '';
         const members = (g && membersByGroup.get(g.groupId)) || [];
         return {
@@ -3415,8 +3438,9 @@ app.get('/api/article', async (req, res) => {
     const hit = list.find((e) => e.link === url && (e.body || e.summary));
     if (hit) {
       const image = hit.image || imageCache.get(url) || '';
-      const body = maybeFormatFreebuff(cleanBodyWithLink(hit.body, url));
-      const summary = cleanBodyWithLink(hit.summary, url) || summarizeText(body);
+      // v3.1.3: 要約側の過去破損（しましました系）も修復する
+      const body = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(hit.body, url)));
+      const summary = repairPastDesuMasuDup(maybeFormatFreebuff(cleanBodyWithLink(hit.summary, url))) || summarizeText(body);
       if (body.length >= SHORT_BODY_CHARS || !shouldRefetchBody(url)) {
         if (!body && !summary) {
           return res.json({ ok: true, url, body: '', summary: '', image, cached: true });
@@ -3576,6 +3600,7 @@ module.exports = {
   formatFreebuffBody,
   maybeFormatFreebuff,
   toDesuMasu,
+  repairPastDesuMasuDup,
   currentBodyMaxChars,
   FREEBUFF_BODY_MAX_CHARS,
   FREEBUFF_SUMMARY_CHARS,

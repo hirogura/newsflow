@@ -249,6 +249,8 @@ MIT License (Copyright (c) 2026 hirogura)。詳細は `LICENSE` を参照して�
   約50秒ごとに `ping` を送り、heartbeat が3分以上途絶えた場合も張り直します。
 - 受信した速報は正規化 (`normalizeEew`) のうえ、ブラウザへ SSE (`GET /api/eew/stream`、`EventSource` で購読) で push します。
   メイン画面は受信時に画面最上部へ警告バー (`#eewBar`、震源・最大震度・マグニチュード等) を表示し、受信から1分後に自動で消します。
+  表示と同時に音声でも通知します (v3.1.3〜。画面を見ずに音声だけ聞いている場合のため。
+  現在の読み上げを中断して速報文を読み上げ、後に元の記事先頭から再開。訓練報・取消報は鳴らしません)。
 - `GET /api/eew` で最新状態（接続状態・最終 heartbeat・最新の速報）を取得できます。
 - `POST /api/eew/mock` で模擬発報ができます（表示確認用。制御系 API と同じく `DISABLE_CONTROL=1` で無効化）。
   例: `curl -X POST http://127.0.0.1:3364/api/eew/mock`

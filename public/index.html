@@ -584,6 +584,112 @@ setInterval(fetchWeather, 30 * 60 * 1000);
 
 // 緊急地震速報 (EEW): サーバーの SSE を購読し、受信時に警告バーを表示する（1分後に自動消去）
 let eewHideTimer = null;
+// 音声通知の重複防止キー（同一速報の再送・再接続時の二重読み上げを防ぐ。v3.1.3）
+let lastEewSpokenKey = null;
+function eewAlertKey(eew) {
+  if (!eew) return '';
+  return [eew.eventId || '', eew.serial || '', eew.announcedTime || ''].join('::');
+}
+// 読み上げ文を組み立てる（震源・最大震度・M・警戒呼びかけ。表示文とは別に音声向けに短く整える）
+function buildEewAlertText(eew) {
+  const parts = ['緊急地震速報です'];
+  if (eew.hypocenter) parts.push(eew.hypocenter + 'で地震が発生しました');
+  if (eew.maxIntensity) parts.push('最大震度は' + eew.maxIntensity + 'と推定されています');
+  if (eew.magnitude) parts.push('マグニチュードは' + eew.magnitude + 'です');
+  parts.push('強い揺れに警戒してください');
+  return parts.join('。') + '。';
+}
+// ブラウザ TTS で速報文だけ読む（ニュース再生の paused/ttsEnabled ガードは受けない。緊急時は設定OFFでも鳴らす）
+function speakEewBrowserAlert(text, onend) {
+  stopVoicevoxAudioOnly();
+  if (!('speechSynthesis' in window)) { onend(); return; }
+  const mySeq = ++playSeq;
+  try { speechSynthesis.cancel(); } catch (e) {}
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ja-JP';
+  u.rate = ttsRate;
+  u.pitch = 1.0;
+  if (jaVoice) u.voice = jaVoice;
+  const resumeTimer = setInterval(() => {
+    try { if (speechSynthesis.speaking) speechSynthesis.resume(); } catch (e) {}
+  }, 10000);
+  const wrapped = () => {
+    clearInterval(resumeTimer);
+    if (mySeq !== playSeq) return;
+    onend();
+  };
+  u.onend = wrapped;
+  u.onerror = wrapped;
+  try {
+    speechSynthesis.speak(u);
+  } catch (e) { wrapped(); }
+}
+// VOICEVOX で速報文だけ読む（ニュース再生の一時停止ガードは受けない。失敗時はブラウザTTSへ）
+function playEewVoicevoxUrl(url, text, mySeq, onend) {
+  const audio = new Audio(url);
+  voicevoxAudio = audio;
+  audio.onended = () => {
+    if (voicevoxAudio === audio) voicevoxAudio = null;
+    if (mySeq !== playSeq) return;
+    onend();
+  };
+  audio.onerror = () => {
+    if (voicevoxAudio === audio) voicevoxAudio = null;
+    if (mySeq !== playSeq) return;
+    speakEewBrowserAlert(text, onend);
+  };
+  const pr = audio.play();
+  if (pr && typeof pr.then === 'function') {
+    pr.catch(() => {
+      if (voicevoxAudio === audio) voicevoxAudio = null;
+      if (mySeq !== playSeq) return;
+      speakEewBrowserAlert(text, onend);
+    });
+  }
+}
+function speakEewVoicevoxAlert(text, onend) {
+  const mySeq = ++playSeq;
+  stopVoicevoxAudioOnly();
+  try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
+  const speaker = (ttsEngine === 'voicevox' && voicevoxRotate)
+    ? voicevoxRotatedSpeaker(voicevoxRotatePos) : voicevoxSpeaker;
+  fetchVoicevoxAudio(text, speaker).then((url) => {
+    if (mySeq !== playSeq) return;
+    playEewVoicevoxUrl(url, text, mySeq, onend);
+  }).catch(() => {
+    if (mySeq !== playSeq) return;
+    speakEewBrowserAlert(text, onend);
+  });
+}
+// 警告バー表示と同時に音声でも通知する（v3.1.3。画面を見ずに音声だけ聞いている場合のため）。
+// 訓練報・取消報は鳴らさない。再生開始前（自動再生規制で発話不可）は表示のみにする。
+function speakEewAlert(eew) {
+  try {
+    if (!eew || eew.isTraining || eew.isCancel) return;
+    if (!started) return;
+    const key = eewAlertKey(eew);
+    if (key && key === lastEewSpokenKey) return;
+    lastEewSpokenKey = key;
+    const text = buildEewAlertText(eew);
+    if (!text) return;
+    const wasPaused = paused;
+    try { stopSpeech(); } catch (e) {}
+    try { stopBodyAutoScroll(); } catch (e) {}
+    speaking = true;
+    const done = () => {
+      speaking = false;
+      if (!started) return;
+      // 一時停止中だった場合は停止のまま表示だけ戻す。再生中だった場合は元の記事先頭から再開する
+      if (wasPaused) {
+        try { showCurrent(); } catch (e) {}
+        return;
+      }
+      playAt(idx);
+    };
+    if (ttsEngine === 'voicevox') speakEewVoicevoxAlert(text, done);
+    else speakEewBrowserAlert(text, done);
+  } catch (e) { /* 通知失敗でもニュース再生は継続 */ }
+}
 function showEewBar(eew) {
   const bar = document.getElementById('eewBar');
   if (!bar || !eew) return;
@@ -611,6 +717,8 @@ function showEewBar(eew) {
     eewHideTimer = null;
     bar.style.display = 'none';
   }, 60 * 1000);
+  // 画面を見ずに音声だけ聞いている場合のため、表示と同時に音声でも通知する（v3.1.3）
+  speakEewAlert(eew);
 }
 function subscribeEew() {
   try {
@@ -1459,6 +1567,13 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   updatePauseUI();
   buildList();
   playAt(0);
+  // 再生開始前に速報が出ていた場合は表示だけ残っているため、音声でも取りこぼさず通知する（v3.1.3）
+  fetch('/api/eew', { cache: 'no-store' }).then((r) => r.json()).then((d) => {
+    if (d && d.eew && d.eew.receivedAt) {
+      const age = Date.now() - Date.parse(d.eew.receivedAt);
+      if (Number.isFinite(age) && age >= 0 && age < 60 * 1000) speakEewAlert(d.eew);
+    }
+  }).catch(() => {});
   try {
     if (document.documentElement.requestFullscreen) {
       await document.documentElement.requestFullscreen().catch(() => {});
