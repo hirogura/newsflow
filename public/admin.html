@@ -33,19 +33,20 @@
   button.danger:hover { background: #7a2020; }
   button.primary { background: #0a4d8c; border-color: #2f6fd0; }
   button.primary:hover { background: #0d61ad; }
-  form.add {
+  .add {
     background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
     padding: 16px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px;
   }
-  form.add label { font-size: 13px; color: #bbb; }
-  form.add input {
+  .add label { font-size: 13px; color: #bbb; }
+  .add input {
     background: #0d0d0d; color: #eee; border: 1px solid #444;
     border-radius: 6px; padding: 8px 10px; font-size: 14px; width: 100%;
   }
-  form.add select {
+  .add select {
     background: #0d0d0d; color: #eee; border: 1px solid #444;
     border-radius: 6px; padding: 8px 10px; font-size: 14px;
   }
+  .add table { margin-bottom: 0; }
   #msg { min-height: 1.5em; font-size: 14px; margin-bottom: 12px; }
   #msg.err { color: #f66; } #msg.ok { color: #7dd87d; }
   .row { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
@@ -62,9 +63,9 @@
   body.light button.danger:hover { background: #f1b0b7; }
   body.light button.primary { background: #0a4d8c; border-color: #2f6fd0; color: #fff; }
   body.light button.primary:hover { background: #0d61ad; }
-  body.light form.add { background: #fff; border-color: #ddd; }
-  body.light form.add label { color: #555; }
-  body.light form.add input, body.light form.add select { background: #fff; color: #222; border-color: #bbb; }
+  body.light .add { background: #fff; border-color: #ddd; }
+  body.light .add label { color: #555; }
+  body.light .add input, body.light .add select { background: #fff; color: #222; border-color: #bbb; }
   body.light #msg.err { color: #c00; } body.light #msg.ok { color: #1e7e34; }
   /* ライトモダン（テレビのニュースダイジェスト風。body.light-modern のみ。dark/light は不変） */
   body.light-modern { background: #edf1f4; color: #111; }
@@ -80,9 +81,9 @@
   body.light-modern button.danger:hover { background: #f1b0b7; }
   body.light-modern button.primary { background: linear-gradient(135deg, #00b8c4, #00d68a); border-color: transparent; color: #fff; box-shadow: 0 2px 8px rgba(0,180,170,0.35); }
   body.light-modern button.primary:hover { filter: brightness(1.05); }
-  body.light-modern form.add { background: #fff; border-color: #d5e2e6; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
-  body.light-modern form.add label { color: #555; }
-  body.light-modern form.add input, body.light-modern form.add select { background: #fff; color: #222; border-color: #bfe3ea; }
+  body.light-modern .add { background: #fff; border-color: #d5e2e6; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }
+  body.light-modern .add label { color: #555; }
+  body.light-modern .add input, body.light-modern .add select { background: #fff; color: #222; border-color: #bfe3ea; }
   body.light-modern #msg.err { color: #c00; } body.light-modern #msg.ok { color: #007a5e; }
 </style>
 </head>
@@ -94,10 +95,12 @@
 <div id="msg"></div>
 
 <h2 style="font-size:16px;margin-bottom:10px;">登録中のフィード</h2>
-<table>
+<div class="add" id="feedListBox">
+<table style="margin-bottom:0;">
   <thead><tr><th>#</th><th>名前</th><th>種別</th><th>URL</th><th>状態</th><th>対象</th><th>操作</th></tr></thead>
   <tbody id="feedRows"><tr><td colspan="7">読み込み中…</td></tr></tbody>
 </table>
+</div>
 
 <h2 style="font-size:16px;margin-bottom:10px;">フィードを追加</h2>
 <form class="add" id="addForm">
