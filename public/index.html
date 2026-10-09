@@ -81,22 +81,24 @@
     display: flex;
     width: 100vw; height: 95vh;
   }
-  /* 左: 記事内容 */
+  /* 左: 記事内容（タイトル上詰め・本文は残り高さで表示し溢れたらスクロール） */
   #left {
     flex: 0 0 62%;
     display: flex; flex-direction: column;
-    justify-content: center;
+    justify-content: flex-start;
     padding: 3vmin 4vmin;
     overflow: hidden;
+    min-height: 0;
   }
   #title {
     font-size: 4.6vmin; font-weight: 700;
     line-height: 1.5;
     word-break: break-word;
     margin-bottom: 2.5vmin;
+    flex: 0 0 auto;
   }
   /* 左下フッター: 都道府県バッジ + 媒体/日時・件数（タイトルを一番上に上げるため下へ移動） */
-  #footRow { display: flex; align-items: center; gap: 1.5vmin; margin-top: 2.5vmin; flex-wrap: wrap; }
+  #footRow { display: flex; align-items: center; gap: 1.5vmin; margin-top: 2.5vmin; flex-wrap: wrap; flex: 0 0 auto; }
   #pref {
     display: inline-block;
     font-size: 3vmin; font-weight: 700;
@@ -123,22 +125,26 @@
     border-radius: 1vmin;
     margin-bottom: 2vmin;
     background: #111;
+    flex: 0 0 auto;
   }
   #body {
     font-size: 2.9vmin; font-weight: 400;
     line-height: 1.9;
     color: #e8e8e8;
     word-break: break-word;
-    display: -webkit-box;
-    -webkit-line-clamp: 8;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
+    display: block;
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
   }
   #body.empty { color: #777; }
   #related {
     margin-top: 2vmin;
     font-size: 2.2vmin; color: #9fc3ff;
     line-height: 1.7;
+    flex: 0 0 auto;
   }
   #related .rel-label { color: #6f9bd8; font-weight: 700; }
   #meta {
@@ -151,6 +157,7 @@
   #hint {
     margin-top: 1vmin;
     font-size: 1.9vmin; color: #555;
+    flex: 0 0 auto;
   }
   /* 右: タイトル一覧 */
   #right {
@@ -818,6 +825,7 @@ function showCurrent() {
   }
   showPhoto(cur.image);
   renderBody(cur);
+  try { elBody.scrollTop = 0; } catch (e) {}
   if (cur.groupSize > 1) {
     elGroup.style.display = 'inline-block';
     elGroup.textContent = '関連記事 ' + cur.groupSize + '件';
