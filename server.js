@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '3.1.1';
+const VERSION = '3.1.2';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -1315,26 +1315,41 @@ function currentBodyMaxChars() {
   return settings && settings.freebuffFormat ? FREEBUFF_BODY_MAX_CHARS : ARTICLE_BODY_MAX_CHARS;
 }
 
-/** ですます調への簡易変換（語尾の言い切りを丁寧語に寄せる） */
+/**
+ * ですます調への簡易変換（語尾の言い切りを丁寧語に寄せる）。
+ * v3.1.2: 既に丁寧語の部分への重複適用を防ぐ（「ました」「でした」は一時保護し、
+ * 「まだ」「ただ」等の「だ」は変換しない）。過去データの破損
+ *（ましました→ました、でしました→でした）も先に修復するため、本関数は冪等。
+ * なお「ない→ありません」系は動詞否定（しない・食べない・来ない）と
+ * 形容詞（少ない・危ない）の区別が正規表現では不可能で、どちらも破壊する
+ *（少ありません・食べありません）ため、あえて変換しない（原文維持）。
+ */
 function toDesuMasu(s) {
   let t = String(s == null ? '' : s);
   if (!t) return t;
+  // 0. 過去の重複破損を修復（例: わかりましましました→わかりました）
+  t = t.replace(/(まし)+ました/g, 'ました');
+  t = t.replace(/でし(まし)+た/g, 'でした');
+  // 0b. 既存の丁寧語を一時保護（未変換の常体は原文のまま残る）
+  const PH_M = '\uE000';
+  const PH_D = '\uE001';
+  t = t.replace(/ました/g, PH_M).replace(/でした/g, PH_D);
+  // した系を先に処理する（後続の「だった→でした」が作る「でした」を重ねて壊さないため）
   const rules = [
-    [/である。/g, 'です。'],
-    [/であった。/g, 'でした。'],
-    [/だった。/g, 'でした。'],
-    [/だ。/g, 'です。'],
-    [/である$/g, 'です'],
-    [/だ$/g, 'です'],
     [/する。/g, 'します。'],
     [/した。/g, 'しました。'],
     [/している。/g, 'しています。'],
     [/している$/g, 'しています'],
     [/した$/g, 'しました'],
-    [/ない。/g, 'ありません。'],
-    [/なかった。/g, 'ありませんでした。'],
+    [/である。/g, 'です。'],
+    [/であった。/g, 'でした。'],
+    [/だった。/g, 'でした。'],
+    [/(?<![またただ未])だ。/g, 'です。'],
+    [/である$/g, 'です'],
+    [/(?<![またただ未])だ$/g, 'です'],
   ];
   for (const [re, rep] of rules) t = t.replace(re, rep);
+  t = t.split(PH_M).join('ました').split(PH_D).join('でした');
   return t;
 }
 
@@ -1357,7 +1372,19 @@ function formatFreebuffBody(text) {
       return true;
     });
     s = lines.join('\n') || s;
-    // 2. 不要な半角・全角空白の消去（必要空白は残す）
+    // 2. 不要な半角・全角空白の消去
+    // 2a. 日本語まわり・括弧内の無駄スペースを除去（欧文同士の必要空白は残す）
+    const JP = 'ぁ-んァ-ヶ一-鿿々〆〤';
+    const SP = '[ \\t\\u3000\\xa0]';
+    const AN = 'A-Za-z0-9';
+    s = s.replace(new RegExp(`([${JP}])${SP}+(?=[${JP}])`, 'g'), '$1'); // 日本語同士
+    s = s.replace(new RegExp(`([${AN}])${SP}+(?=[${JP}])`, 'g'), '$1'); // 欧文→日本語
+    s = s.replace(new RegExp(`([${JP}])${SP}+(?=[${AN}])`, 'g'), '$1'); // 日本語→欧文
+    s = s.replace(new RegExp(`([。！？」』）])${SP}+(?=[${JP}「（])`, 'g'), '$1'); // 句読点後
+    s = s.replace(new RegExp(`${SP}+(?=[。、！？」』）])`, 'g'), ''); // 句読点前
+    s = s.replace(new RegExp(`([（(])${SP}+`, 'g'), '$1'); // 開き括弧後
+    s = s.replace(new RegExp(`${SP}+([）)])`, 'g'), '$1'); // 閉じ括弧前
+    // 2b. 残りの連続空白を1つに圧縮（必要空白は残す）
     s = s.replace(/[ \t\u3000\xa0]+/g, (m) => (m.includes('\n') ? m : ' '));
     s = s.split('\n').map((l) => l.replace(/ +/g, ' ').trim()).filter(Boolean).join('\n');
     s = s.replace(/\n{3,}/g, '\n\n').trim();
