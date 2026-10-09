@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '2.9.0';
+const VERSION = '3.0.0';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -54,6 +54,7 @@ const DEFAULT_SETTINGS = {
   voicevoxRotate: false, // true のとき1記事ごとに VOICEVOX_SPEAKERS の順で話者を切り替える（v2.9.0「順番」）
   theme: 'dark', // 画面テーマ（'dark' / 'light' / 'light-modern'）
   weatherArea: '130000', // 天気の地域（気象庁の予報区コード。既定は東京）
+  freebuffFormat: false, // freebuff整形（ローカル整形関数。外部CLI/API呼び出しなし。v3.0.0）
 };
 
 function getDefaultSettings() {
@@ -120,6 +121,10 @@ function normalizeSettings(input, base) {
   if (src.voicevoxRotate !== undefined) {
     const v = src.voicevoxRotate;
     s.voicevoxRotate = !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off');
+  }
+  if (src.freebuffFormat !== undefined) {
+    const v = src.freebuffFormat;
+    s.freebuffFormat = !(v === false || v === 0 || v === 'false' || v === '0' || v === 'off');
   }
   if (src.theme !== undefined) {
     const t = String(src.theme).toLowerCase();
@@ -1050,8 +1055,9 @@ function isPromoParagraph(t) {
 /** 文末記号（本文らしい終わり）。「…」で終わるNHK式の文も本文扱いにする */
 const SENTENCE_END_RE = /[。！？!?…」』）］〉》.]$/;
 
-function extractMainParagraphs(html) {
+function extractMainParagraphs(html, maxChars) {
   if (!html) return [];
+  const limit = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : ARTICLE_BODY_MAX_CHARS;
   let scope = String(html);
   const artStart = scope.search(/<article[\s>]/i);
   const artEnd = scope.search(/<\/article>/i);
@@ -1095,7 +1101,7 @@ function extractMainParagraphs(html) {
       nonSentenceRun = 0;
     }
     out.push(t);
-    if (out.join('').length >= ARTICLE_BODY_MAX_CHARS) break;
+    if (out.join('').length >= limit) break;
   }
   return out;
 }
@@ -1295,6 +1301,87 @@ function summarizeText(text, maxSentences = 3, maxChars = 220) {
  */
 function bodyExcerpt(body, max) {
   return summarizeText(stripSpeakBrackets(body), 3, max == null ? BODY_READ_CHARS : max);
+}
+
+// ---------- freebuff整形（v3.0.0・ローカル純粋関数のみ。外部CLI/API・spawn禁止） ----------
+// RSS・記事取得後の本文に、有効時のみ適用する。
+// 内容: ですます調/不要な半角全角空白消去(必要空白残す)/広告削除/長文は4行要約。
+// 失敗時は元の本文にフォールバックする。
+const FREEBUFF_BODY_MAX_CHARS = 4000; // 有効時は取得文字数を長めにする
+const FREEBUFF_SUMMARY_CHARS = 800; // 4行要約の上限目安
+
+/** 有効時の取得文字数（無効時は従来の ARTICLE_BODY_MAX_CHARS） */
+function currentBodyMaxChars() {
+  return settings && settings.freebuffFormat ? FREEBUFF_BODY_MAX_CHARS : ARTICLE_BODY_MAX_CHARS;
+}
+
+/** ですます調への簡易変換（語尾の言い切りを丁寧語に寄せる） */
+function toDesuMasu(s) {
+  let t = String(s == null ? '' : s);
+  if (!t) return t;
+  const rules = [
+    [/である。/g, 'です。'],
+    [/であった。/g, 'でした。'],
+    [/だった。/g, 'でした。'],
+    [/だ。/g, 'です。'],
+    [/である$/g, 'です'],
+    [/だ$/g, 'です'],
+    [/する。/g, 'します。'],
+    [/した。/g, 'しました。'],
+    [/している。/g, 'しています。'],
+    [/している$/g, 'しています'],
+    [/した$/g, 'しました'],
+    [/ない。/g, 'ありません。'],
+    [/なかった。/g, 'ありませんでした。'],
+  ];
+  for (const [re, rep] of rules) t = t.replace(re, rep);
+  return t;
+}
+
+/**
+ * ローカル整形の純粋関数（外部呼び出しなし）。
+ * @param {string} text 元の本文
+ * @returns {string} 整形後の本文（失敗時は原文）
+ */
+function formatFreebuffBody(text) {
+  try {
+    const orig = String(text == null ? '' : text);
+    if (!orig.trim()) return orig;
+    // 1. 広告・誘導の除去（行単位。必要空白は残す）
+    let s = sanitizeBodyText(orig);
+    const lines = s.split('\n').map((l) => l.trim()).filter((l) => {
+      if (!l) return false;
+      if (/^(\[PR\]|【PR】|PR[:：]|広告)/.test(l)) return false;
+      if (isPromoParagraph(l)) return false;
+      if (/^(関連記事|関連ニュース|おすすめ記事|あわせて読みたい)/.test(l)) return false;
+      return true;
+    });
+    s = lines.join('\n') || s;
+    // 2. 不要な半角・全角空白の消去（必要空白は残す）
+    s = s.replace(/[ \t\u3000\xa0]+/g, (m) => (m.includes('\n') ? m : ' '));
+    s = s.split('\n').map((l) => l.replace(/ +/g, ' ').trim()).filter(Boolean).join('\n');
+    s = s.replace(/\n{3,}/g, '\n\n').trim();
+    if (!s) return orig;
+    // 3. ですます調
+    s = toDesuMasu(s);
+    // 4. 長文は4行要約（文区切りで先頭4文・上限で丸め）
+    const parts = s.match(/[^。！？\n]+[。！？\n]?/g) || [s];
+    const sents = parts.map((p) => p.trim()).filter(Boolean);
+    if (sents.length > 4 || s.length > FREEBUFF_SUMMARY_CHARS) {
+      let out = sents.slice(0, 4).join('');
+      if (out.length > FREEBUFF_SUMMARY_CHARS) out = truncateAtPunctuation(out, FREEBUFF_SUMMARY_CHARS);
+      s = out.trim() || s;
+    }
+    return s || orig;
+  } catch (_) {
+    return String(text == null ? '' : text);
+  }
+}
+
+/** 設定が有効な場合のみ整形する（無効時は原文のまま） */
+function maybeFormatFreebuff(text) {
+  if (!settings || !settings.freebuffFormat) return String(text == null ? '' : text);
+  return formatFreebuffBody(text);
 }
 
 /**
@@ -1730,7 +1817,7 @@ function extractArticleDescription(html, maxChars = ARTICLE_BODY_MAX_CHARS, link
   const yomiuriFree = cands.some((c) => c.replace(/^\s+/, '').startsWith('【読売新聞】'));
   if (!(isYomiuri && !yomiuriFree)) {
     // 主文エリアの <p> を結合した全文候補（従来は先頭1段落×500字だったものを拡張）
-    const paras = extractMainParagraphs(html);
+    const paras = extractMainParagraphs(html, maxChars);
     if (paras.length > 0) {
       let joined = '';
       for (const p of paras) {
@@ -1937,9 +2024,12 @@ async function fetchArticlePage(url, timeoutMs = 10000) {
       return { body: bodyCache.get(url) || '', image: imageCache.get(url) || '' };
     }
     const html = await res.text();
-    let body = extractArticleDescription(html, ARTICLE_BODY_MAX_CHARS, url);
+    // v3.0.0: 有効時は取得文字数を長めにし、取得後にローカル整形をかける（外部呼び出しなし）
+    const maxChars = currentBodyMaxChars();
+    let body = extractArticleDescription(html, maxChars, url);
     // 有料壁などでナビ・JSが混入したゴミ本文は破棄し、タイトルのみ読み上げにする
     body = cleanBodyWithLink(body, url);
+    body = maybeFormatFreebuff(body);
     // キャッシュ済みの本文より今回の方が長ければ長い方を残す（短い snippet で上書きしない）
     const cached = bodyCache.get(url) || '';
     if (cached) body = pickLongerBody(cached, body);
@@ -1994,6 +2084,7 @@ async function fillMissingBodies(items, { concurrency = 5, limit = 120 } = {}) {
         if (!image && page.image) image = page.image;
       }
       if (body && body !== it.body) {
+        body = maybeFormatFreebuff(body);
         it.body = body;
         it.summary = summarizeText(body);
         bodyCache.set(it.link, body);
@@ -2211,7 +2302,7 @@ function ingestFeedItems(feed, items, fetchedAt) {
       }
       // RSS 時点の本文（content:encoded 等の全文優先）を保持する。
       // 記事ページの追いかけ取得でさらに長い本文が取れれば fillMissingBodies が上書きする。
-      const initBody = cleanBodyWithLink(n.body, n.link);
+      const initBody = maybeFormatFreebuff(cleanBodyWithLink(n.body, n.link));
       list.unshift({
         prefecture: pref,
         title: n.title,
@@ -2338,7 +2429,7 @@ function flatItems() {
       if (!isFeedEnabledFor(e, enabledIds)) continue;
       // 旧キャッシュ由来のゴミ本文・有料壁残渣が残っていても表示・読み上げに出さない
       const rawBody = e.body || bodyCache.get(e.link) || '';
-      const body = cleanBodyWithLink(rawBody, e.link);
+      const body = maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link));
       const rawSummary = e.summary || '';
       const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
       out.push({
@@ -2423,7 +2514,7 @@ function buildPrefectures() {
       news: list.map((e) => {
         const g = byKey.get(memberKey(e, pref));
         const rawBody = e.body || bodyCache.get(e.link) || '';
-        const body = cleanBodyWithLink(rawBody, e.link);
+        const body = maybeFormatFreebuff(cleanBodyWithLink(rawBody, e.link));
         const rawSummary = e.summary || '';
         const summary = cleanBodyWithLink(rawSummary, e.link) || summarizeText(body);
         const image = e.image || imageCache.get(e.link) || '';
@@ -3297,7 +3388,7 @@ app.get('/api/article', async (req, res) => {
     const hit = list.find((e) => e.link === url && (e.body || e.summary));
     if (hit) {
       const image = hit.image || imageCache.get(url) || '';
-      const body = cleanBodyWithLink(hit.body, url);
+      const body = maybeFormatFreebuff(cleanBodyWithLink(hit.body, url));
       const summary = cleanBodyWithLink(hit.summary, url) || summarizeText(body);
       if (body.length >= SHORT_BODY_CHARS || !shouldRefetchBody(url)) {
         if (!body && !summary) {
@@ -3455,6 +3546,12 @@ module.exports = {
   interleaveAvoidSameGroup,
   summarizeText,
   bodyExcerpt,
+  formatFreebuffBody,
+  maybeFormatFreebuff,
+  toDesuMasu,
+  currentBodyMaxChars,
+  FREEBUFF_BODY_MAX_CHARS,
+  FREEBUFF_SUMMARY_CHARS,
   stripSpeakBrackets,
   stripReadMore,
   truncateAtPunctuation,

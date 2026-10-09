@@ -170,6 +170,15 @@
   <div style="font-size:12px;color:#888;">「VOICEVOXを使用する」を押すとサーバーが VOICEVOX ENGINE を自動インストール（約1.8GB・数分）し、VOICEVOX読み上げに切り替わります。話者ボタンで「ずんだもん」「四国めたん」「雀松朱司」「春日部つむぎ」「青山龍星」「もち子さん」「No.7」を切り替えられます。「順番」を押すと1記事ごとに話者を順番に切り替えながら読み上げます（もう一度押すと解除）。使えない場合はブラウザ読み上げにフォールバックします。</div>
 </div>
 
+<h2 style="font-size:16px;margin:24px 0 10px;">freebuffで整形</h2>
+<div class="add" id="freebuffBox">
+  <div id="fbStatus" style="font-size:13px;color:#bbb;">整形機能の状態を確認しています…</div>
+  <div class="row" style="margin-bottom:0;">
+    <button id="fbToggleBtn" type="button">有効にする</button>
+  </div>
+  <div style="font-size:12px;color:#888;">有効にすると、RSS・記事取得後の本文をローカル整形関数で整形します（ですます調・不要な空白消去・広告削除・長文は4行要約）。外部プロセスの起動はありません。</div>
+</div>
+
 <h2 style="font-size:16px;margin:24px 0 10px;">天気の地域</h2>
 <form class="add" id="weatherForm">
   <label>予報地域（トップ画面ヘッダーの天気表示に使用・気象庁の予報）
@@ -449,6 +458,9 @@ async function loadSettings() {
       applyTheme(s.theme);
     }
     if (s.weatherArea != null) document.getElementById('sWeather').value = String(s.weatherArea);
+    if (typeof updateFbButton === 'function') {
+      try { updateFbButton(!!s.freebuffFormat); } catch (_) {}
+    }
     if (s.voicevoxSpeaker != null && typeof updateVvSpeakerButtons === 'function') {
       try { updateVvSpeakerButtons(Number(s.voicevoxSpeaker), !!s.voicevoxRotate); } catch (_) {}
     }
@@ -487,6 +499,42 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
     showMsg('設定の保存に失敗しました: ' + e2.message, 'err');
   }
 });
+
+// ---- freebuffで整形（v3.0.0・ON/OFF切替） ----
+let fbEnabled = false;
+function updateFbButton(on) {
+  fbEnabled = !!on;
+  const btn = document.getElementById('fbToggleBtn');
+  const st = document.getElementById('fbStatus');
+  if (btn) {
+    btn.textContent = fbEnabled ? '無効にする' : '有効にする';
+    btn.classList.toggle('primary', !fbEnabled);
+    btn.setAttribute('aria-pressed', fbEnabled ? 'true' : 'false');
+  }
+  if (st) st.textContent = fbEnabled ? 'freebuff整形: 有効（本文をローカル整形します）' : 'freebuff整形: 無効（従来通りの本文）';
+}
+{
+  const fbtn = document.getElementById('fbToggleBtn');
+  if (fbtn) fbtn.addEventListener('click', async () => {
+    showMsg('');
+    fbtn.disabled = true;
+    try {
+      const res = await fetch('/api/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ freebuffFormat: !fbEnabled }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
+      updateFbButton(!!(data.settings && data.settings.freebuffFormat));
+      showMsg(fbEnabled ? 'freebuff整形を有効にしました。' : 'freebuff整形を無効にしました。', 'ok');
+    } catch (e2) {
+      showMsg('freebuff整形の切り替えに失敗しました: ' + e2.message, 'err');
+    } finally {
+      fbtn.disabled = false;
+    }
+  });
+}
 
 document.getElementById('weatherForm').addEventListener('submit', async (e) => {
   e.preventDefault();
