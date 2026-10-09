@@ -418,6 +418,66 @@ if (elPhoto) {
   elPhoto.addEventListener('error', () => { hidePhoto(); });
 }
 
+// ---- 本文の自動スクロール (v3.1.1) ----
+// 読み上げ時間に合わせて本文欄をゆっくり下へ動かし、長文でも操作なしで全文が見えるようにする。
+// 一時停止・記事切替で止まり、利用者が手でスクロールした記事では自動追従しない。
+let bodyScrollToken = 0;
+let bodyScrollRAF = 0;
+let bodyAutoScrollOff = false; // true の間は当該記事で自動スクロールしない（利用者の手動操作を優先）
+function stopBodyAutoScroll() {
+  bodyScrollToken++;
+  if (bodyScrollRAF) {
+    try { cancelAnimationFrame(bodyScrollRAF); } catch (e) {}
+    bodyScrollRAF = 0;
+  }
+}
+// 読み上げ文の文字数から読み上げ秒数を見積もる（ブラウザ/VOICEVOX共通の目安）
+function estimateReadSeconds(text) {
+  const len = String(text == null ? '' : text).length;
+  const rate = (typeof ttsRate === 'number' && ttsRate > 0) ? ttsRate : 1.2;
+  const cps = 6 * rate; // rate 1.0 で約6文字/秒の想定
+  return Math.min(90, Math.max(5, len / cps + 1.5));
+}
+function startBodyAutoScroll(text, capMs) {
+  stopBodyAutoScroll();
+  bodyAutoScrollOff = false;
+  if (!elBody) return;
+  try {
+    if (typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  } catch (e) {}
+  const myToken = bodyScrollToken;
+  const maxScroll = elBody.scrollHeight - elBody.clientHeight;
+  if (!Number.isFinite(maxScroll) || maxScroll <= 4) return;
+  let totalMs = estimateReadSeconds(text) * 1000;
+  if (Number.isFinite(capMs) && capMs > 0) totalMs = Math.min(totalMs, capMs);
+  const startDelayMs = 1200; // 最初は先頭を少し見せてから動かす
+  const from = elBody.scrollTop || 0;
+  const dist = maxScroll - from;
+  if (dist <= 4) return;
+  const t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const step = (now) => {
+    bodyScrollRAF = 0;
+    if (myToken !== bodyScrollToken) return;
+    if (paused || !started || bodyAutoScrollOff) return;
+    const t = (typeof now === 'number') ? now : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+    const el = (t - t0 - startDelayMs) / Math.max(1, totalMs - startDelayMs);
+    if (el <= 0) {
+      bodyScrollRAF = requestAnimationFrame(step);
+      return;
+    }
+    const p = Math.min(1, el);
+    try { elBody.scrollTop = from + dist * p; } catch (e) {}
+    if (p < 1) bodyScrollRAF = requestAnimationFrame(step);
+  };
+  bodyScrollRAF = requestAnimationFrame(step);
+}
+if (elBody) {
+  const cancelAuto = () => { bodyAutoScrollOff = true; };
+  elBody.addEventListener('wheel', cancelAuto, { passive: true });
+  elBody.addEventListener('touchmove', cancelAuto, { passive: true });
+  elBody.addEventListener('pointerdown', cancelAuto);
+}
+
 function isHttpUrl(u) {
   return typeof u === 'string' && /^https?:\/\//.test(u);
 }
@@ -713,6 +773,10 @@ async function backfillBody(item) {
     if (playlist[idx] !== item) return;
     renderBody(item);
     if (item.image) showPhoto(item.image);
+    // 表示中の記事本文が後から埋まった場合は自動スクロールを追従させる（手動操作中は除く）
+    try {
+      if (!bodyAutoScrollOff && started && !paused) startBodyAutoScroll(buildSpeakText(item.title, item.summary || item.body, item.link));
+    } catch (e) {}
   } catch (e) { /* 失敗無視: タイトルのみ読み上げ */ }
 }
 
@@ -890,12 +954,14 @@ function buildSpeakText(title, extra, link) {
 function speak(text, onend, vvSpeaker) {
   showCurrent();
   if (paused) { speaking = false; return; }
-  // 読み上げ Off の場合は発話せず一定時間表示して次へ
+  // 読み上げ Off の場合は発話せず一定時間表示して次へ（表示4秒に合わせてスクロール）
   if (!ttsEnabled) {
+    startBodyAutoScroll(text, 4000);
     if (pendingTimer) clearTimeout(pendingTimer);
     pendingTimer = setTimeout(() => { pendingTimer = null; onend(); }, 4000);
     return;
   }
+  startBodyAutoScroll(text);
   // VOICEVOX 指定時はサーバープロキシ経由の WAV 再生を試みる。
   // 使えない場合は従来どおりブラウザ TTS にフォールバックする。
   if (ttsEngine === 'voicevox') {
@@ -1087,6 +1153,7 @@ function speakBrowser(text, onend) {
 function stopSpeech() {
   // 古い発話の遅延 onend/onerror を無効化してから停止する（Chrome 対策）
   playSeq++;
+  stopBodyAutoScroll();
   if (pendingTimer) { clearTimeout(pendingTimer); pendingTimer = null; }
   stopVoicevoxAudioOnly();
   try { if ('speechSynthesis' in window) speechSynthesis.cancel(); } catch (e) {}
