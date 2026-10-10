@@ -352,7 +352,8 @@
     <button id="updateBtn" type="button">アップデート</button>
     <button id="rebootBtn" type="button">再起動</button>
   </div>
-  <div id="ver">v.2.5.0</div>
+  <!-- バージョン表記は起動時に /api/version から取得して上書きする（古い固定値を書くと更新直後に一瞬だけ stale 表示になるため空にしておく） -->
+  <div id="ver"></div>
   <div id="ctrlMsg"></div>
   <div id="err"></div>
 </div>

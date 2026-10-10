@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '3.1.4';
+const VERSION = '3.1.5';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -2970,7 +2970,8 @@ function findJmaArea(areas, code) {
  * 気象庁の予報JSON（府県予報＋週間予報）から今日/明日/明後日の3日分を抜き出す。
  * - 天気: 府県予報の概況（3日分あり）
  * - 降水確率: 府県予報の時間帯別を日別最大に集約 → 無ければ週間予報
- * - 気温: 府県予報の気温（00時=最低・それ以外=最高）→ 無ければ週間予報の tempsMin/tempsMax
+ * - 気温: 府県予報の気温（位置ベース。日中発表の4要素=[今日日中最高, 今日最高, 明日朝最低, 明日日中最高] /
+ *         夜間発表の2要素=[明日朝最低, 明日日中最高]。今日の最低は提供されない）→ 無ければ週間予報の tempsMin/tempsMax
  */
 function parseJmaForecast(json, areaCode) {
   const root = Array.isArray(json) ? json[0] : null;
@@ -2985,22 +2986,43 @@ function parseJmaForecast(json, areaCode) {
   const wPopArea = findJmaArea(weekly[0] && weekly[0].areas, areaCode);
   const wTempArea = (weekly[1] && weekly[1].areas && weekly[1].areas[0]) || null;
   const popByDate = groupJmaByDate(ts[1] && ts[1].timeDefines, pArea && pArea.pops);
-  // 府県予報の気温を日別に振り分け
+  // 府県予報の気温を日別に振り分け（位置ベース。時刻では判定しない）
+  // 日中発表(5時/11時)の4要素は [今日日中最高, 今日最高, 明日朝最低, 明日日中最高]。
+  // 先頭2つはどちらも今日の最高気温の重複値のため、00時という理由だけで最低扱いにすると
+  // 今日の最高/最低が同じ値になる（v3.1.5 で修正）。今日の最低は提供されない。
+  // 夜間発表(17時)の2要素は [明日朝最低, 明日日中最高]。
   const tempMinByDate = new Map();
   const tempMaxByDate = new Map();
   const tTd = (ts[2] && ts[2].timeDefines) || [];
   const tVals = (tArea && tArea.temps) || [];
-  tTd.forEach((t, i) => {
-    const d = jmaDateOf(t);
-    const n = jmaNum(tVals[i]);
-    if (!d || n == null) return;
-    const hour = parseInt(String(t).slice(11, 13), 10);
-    if (hour === 0) {
-      if (!tempMinByDate.has(d)) tempMinByDate.set(d, n);
-    } else if (!tempMaxByDate.has(d)) {
-      tempMaxByDate.set(d, n);
-    }
-  });
+  if (tTd.length >= 4) {
+    const d0 = jmaDateOf(tTd[0]); const n0 = jmaNum(tVals[0]);
+    if (d0 && n0 != null && !tempMaxByDate.has(d0)) tempMaxByDate.set(d0, n0);
+    const d1 = jmaDateOf(tTd[1]); const n1 = jmaNum(tVals[1]);
+    if (d1 && n1 != null && !tempMaxByDate.has(d1)) tempMaxByDate.set(d1, n1);
+    const d2 = jmaDateOf(tTd[2]); const n2 = jmaNum(tVals[2]);
+    if (d2 && n2 != null && !tempMinByDate.has(d2)) tempMinByDate.set(d2, n2);
+    const d3 = jmaDateOf(tTd[3]); const n3 = jmaNum(tVals[3]);
+    if (d3 && n3 != null && !tempMaxByDate.has(d3)) tempMaxByDate.set(d3, n3);
+  } else if (tTd.length === 2) {
+    const d0 = jmaDateOf(tTd[0]); const n0 = jmaNum(tVals[0]);
+    if (d0 && n0 != null && !tempMinByDate.has(d0)) tempMinByDate.set(d0, n0);
+    const d1 = jmaDateOf(tTd[1]); const n1 = jmaNum(tVals[1]);
+    if (d1 && n1 != null && !tempMaxByDate.has(d1)) tempMaxByDate.set(d1, n1);
+  } else {
+    // 未知の形式のフォールバック（従来の時刻判定）
+    tTd.forEach((t, i) => {
+      const d = jmaDateOf(t);
+      const n = jmaNum(tVals[i]);
+      if (!d || n == null) return;
+      const hour = parseInt(String(t).slice(11, 13), 10);
+      if (hour === 0) {
+        if (!tempMinByDate.has(d)) tempMinByDate.set(d, n);
+      } else if (!tempMaxByDate.has(d)) {
+        tempMaxByDate.set(d, n);
+      }
+    });
+  }
   // 週間予報の日付→index
   const wPopDates = ((weekly[0] && weekly[0].timeDefines) || []).map(jmaDateOf);
   const wPops = (wPopArea && wPopArea.pops) || [];
