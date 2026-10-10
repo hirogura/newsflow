@@ -20,7 +20,7 @@ const Parser = require('rss-parser');
 
 const PORT = process.env.PORT || 3364;
 // アプリバージョン（画面表記は「v.」+ この値）
-const VERSION = '3.1.3';
+const VERSION = '3.1.4';
 const DEFAULT_INTERVAL_MINUTES = 15;
 let FETCH_INTERVAL_MS = DEFAULT_INTERVAL_MINUTES * 60 * 1000; // 設定で動的に更新
 let INTERVAL_MINUTES = DEFAULT_INTERVAL_MINUTES; // /api/news 互換キー（設定で動的に更新）
@@ -2142,7 +2142,8 @@ async function fillMissingBodies(items, { concurrency = 5, limit = 120 } = {}) {
         for (const e of list) {
           if (e.link === it.link) {
             if (body) {
-              const merged = pickLongerBody(e.body, body);
+              // v3.1.4: 追いかけ取得のstore反映時も整形を適用（旧キャッシュの未整形本文が長い場合の漏れ修正）
+              const merged = repairPastDesuMasuDup(maybeFormatFreebuff(pickLongerBody(e.body, body)));
               if (merged !== e.body) {
                 e.body = merged;
                 e.summary = summarizeText(merged);
@@ -2339,7 +2340,8 @@ function ingestFeedItems(feed, items, fetchedAt) {
         }
         if (n.body && dup.link) {
           // v3.1.3: 過去破損の混ざったキャッシュと混ぜても破損を残さないよう修復する
-          const merged = repairPastDesuMasuDup(pickLongerBody(dup.body, cleanBodyWithLink(n.body, dup.link)));
+          // v3.1.4: 既存記事への追記時も整形ONなら maybeFormat をかける（RSS受信時整形漏れ修正）
+          const merged = repairPastDesuMasuDup(maybeFormatFreebuff(pickLongerBody(dup.body, cleanBodyWithLink(n.body, dup.link))));
           if (merged !== dup.body) {
             dup.body = merged;
             dup.summary = summarizeText(merged);
@@ -3551,13 +3553,12 @@ async function main() {
   if (settings.ttsEngine === 'voicevox' && isVoicevoxInstalled()) {
     startVoicevox().catch((e) => console.error('voicevox autostart failed:', String((e && e.message) || e)));
   }
-  // 起動直後に1回取得（失敗してもサーバーは起動する）
-  await fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
-  scheduleFetch();
-
+  // v3.1.4: 起動時RSS待ちでlistenが遅延しないよう、先にlisten→scheduleし取得はバックグラウンド化（遅延実行。廃止ではない）
   app.listen(PORT, '127.0.0.1', () => {
     console.log(`[起動] http://127.0.0.1:${PORT} で待受中`);
   });
+  scheduleFetch();
+  fetchAllFeeds().catch((e) => console.error('initial fetch failed:', e));
 }
 
 if (require.main === module) {

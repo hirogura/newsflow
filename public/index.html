@@ -1593,8 +1593,8 @@ document.getElementById('updateBtn').addEventListener('click', async () => {
     const res = await fetch('/api/update', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-    msg.textContent = '更新を開始しました。再起動後に自動で最新ニュースを取得します。数十秒後にページをリロードしてください。';
-    setTimeout(() => window.location.reload(), 45000);
+    msg.textContent = '更新を開始しました。復帰後に自動リロードします…';
+    waitForRecoveryAndReload(msg);
   } catch (e) {
     msg.textContent = 'アップデートに失敗しました: ' + e.message;
   }
@@ -1607,12 +1607,33 @@ document.getElementById('rebootBtn').addEventListener('click', async () => {
     const res = await fetch('/api/restart', { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-    msg.textContent = '再起動を開始しました。30秒ほど待ってリロードしてください。';
-    setTimeout(() => window.location.reload(), 30000);
+    msg.textContent = '再起動を開始しました。復帰後に自動リロードします…';
+    waitForRecoveryAndReload(msg);
   } catch (e) {
     msg.textContent = '再起動に失敗しました: ' + e.message;
   }
 });
+// v3.1.4: 再起動/更新後に /api/health をポーリングし、復帰したら location.reload()
+function waitForRecoveryAndReload(msg) {
+  let tries = 0;
+  const maxTries = 60; // 約5分（5秒間隔）
+  const timer = setInterval(async () => {
+    tries++;
+    try {
+      const res = await fetch('/api/health', { cache: 'no-store' });
+      if (res.ok) {
+        clearInterval(timer);
+        if (msg) msg.textContent = '復帰しました。リロードします…';
+        setTimeout(() => window.location.reload(), 1000);
+        return;
+      }
+    } catch (e) { /* 起動中は接続失敗するので無視 */ }
+    if (tries >= maxTries) {
+      clearInterval(timer);
+      if (msg) msg.textContent = 'まだ復帰していません。手動でリロードしてください。';
+    }
+  }, 5000);
+}
 
 // 起動前のプレビュー表示
 updatePauseUI();
